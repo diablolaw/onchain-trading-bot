@@ -8,13 +8,14 @@ import time
 from pathlib import Path
 
 
-def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,sizing_file=None,observe_only=False,social_port=None):
+def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,sizing_file=None,observe_only=False,social_port=None,paper_config='post-paper.config.json'):
     if decision_interval<60:raise ValueError('decision interval must be >=60')
     root=Path(__file__).resolve().parent.parent
     db=str(Path(db).resolve())
+    config=(root/paper_config).resolve()
     if not observe_only:
-        validate_entry_setup(root,db,sizing_file)
-    common=[sys.executable,'-m','desk','--db',db,'--config',str(root/'post-paper.config.json')]
+        validate_entry_setup(root,db,sizing_file,config)
+    common=[sys.executable,'-m','desk','--db',db,'--config',str(config)]
     decision=common+['--ai-config',str(root/'post-ai.config.json'),'ai-watch','--discovery-feed','--fomo','--limit','3','--interval',str(decision_interval)]
     if sizing_file:decision+=['--sizing-file',str(Path(sizing_file).resolve())]
     if observe_only:decision+=['--observe-only']
@@ -77,12 +78,12 @@ def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,
             except subprocess.TimeoutExpired:p.kill();p.wait()
 
 
-def validate_entry_setup(root,db,sizing_file):
+def validate_entry_setup(root,db,sizing_file,config=None):
     """Reject impossible entry configuration before starting a billed worker."""
     import sqlite3
     from .core import Rules
     from .post_policy import size
-    r=Rules(**json.loads((root/'post-paper.config.json').read_text()))
+    r=Rules(**json.loads(Path(config or root/'post-paper.config.json').read_text()))
     cash=r.initial_cash
     if Path(db).exists():
         with sqlite3.connect(Path(db).resolve().as_uri()+'?mode=ro',uri=True) as connection:
@@ -90,12 +91,13 @@ def validate_entry_setup(root,db,sizing_file):
     if not sizing_file:
         if not r.paper_fixed_fraction:raise ValueError('post-run requires --sizing-file PATH, a paper_fixed_fraction in post-paper.config.json, or explicit --observe-only')
         from .post_policy import fixed_size
-        # Pools at least ten times the minimum liquidity must be sizeable after the partial cut.
-        result=fixed_size(cash,cash,r.paper_fixed_fraction,r.min_liquidity*10,partial=True,liquidity_fraction=r.max_ticket_liquidity_pct/100)
+        # A full-evidence ticket on a pool ten times the minimum liquidity must clear the fee ceiling.
+        # Partial-evidence tickets may still be fee-blocked on small banks; that is reported per entry.
+        result=fixed_size(cash,cash,r.paper_fixed_fraction,r.min_liquidity*10,liquidity_fraction=r.max_ticket_liquidity_pct/100,max_fee_pct=r.max_roundtrip_fee_pct,max_fraction=r.max_bank_fraction)
         if not 0<result['dollars']<=r.ticket:
             # With the $0.95 fee floor and 3% round-trip ceiling, a partial ticket needs about $63,
             # so a 1.5% fraction needs roughly $7,000 of paper cash.
-            raise ValueError(f'paper_fixed_fraction is not viable: account cash is ${cash:,.2f} in {db}; a {r.paper_fixed_fraction:.1%} partial ticket of ${result["dollars"] if result["dollars"] else cash*r.paper_fixed_fraction*.6:,.2f} fails the fee ceiling. Start a fresh ${r.initial_cash:,.0f} account with --post-db data/<new>.sqlite, or use --observe-only')
+            raise ValueError(f'paper_fixed_fraction is not viable: account cash is ${cash:,.2f} in {db}; a {r.paper_fixed_fraction:.1%} ticket of ${result["dollars"] if result["dollars"] else cash*r.paper_fixed_fraction:,.2f} fails the {r.max_roundtrip_fee_pct:g}% fee ceiling. Start a fresh ${r.initial_cash:,.0f} account with --post-db data/<new>.sqlite, or use --observe-only')
         return
     data=json.loads(Path(sizing_file).read_text())
     if not isinstance(data,dict) or not data:raise ValueError('sizing file must contain sourced per-token forecasts')

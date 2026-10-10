@@ -74,6 +74,11 @@ free-cut survivor failed the 5% largest-account rule, and no entry path existed 
 - **FOMO 431.** The extension now reports `fomo_headers_too_large_reload_fomo` in cookie-only mode. Reload the extension,
   then reload fomo.family so a bearer session is captured; bearer requests omit cookies.
 
+- **$100 profile.** `post-paper-100.config.json` mirrors a sub-$100 real bank: $100 paper cash, 40% fixed tickets
+  ($40), a 5% round-trip fee ceiling and no retest add. With the post's $0.95 floor, a 6% cap would mean $6 tickets and
+  ~32% fees. Tickets cut to 60% for missing X evidence ($24, ~7.9% fees) are fee-blocked, so entries need Grok evidence.
+  Run it on its own account: `post-run --post-db data/post-paper-100.sqlite --paper-config post-paper-100.config.json`.
+
 Still not built: BOOK portfolio, BSC/Base/Robinhood collectors, FOMO execution (live), and WorldMonitor seed data.
 
 ## Start the new isolated paper profile

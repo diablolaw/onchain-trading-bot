@@ -50,7 +50,7 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 mint_authority=mint.get('mint_authority'),freeze_authority=mint.get('freeze_authority'),
                 top_wallet_percent=holders.get('top_account_pct'),top_10_percent=holders.get('top10_account_pct'),
                 holder_count=holders.get('owner_count'),developer_holding_percentage=indexed.get('developer_holding_percentage'),
-                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*.06,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
+                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*desk.rules.max_bank_fraction,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
             market_state={k:dossier.get(k) for k in ('observations','changes','holder_growth','volume_ratio_6h','change','liquidity_usd','intended_ticket_usd','ticket_basis')}
             market_state['trade_windows']=snapshot.get('trade_windows')
             job=snapshot.get('social_job') or {}
@@ -94,7 +94,7 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 entry_size=size(cash,cash,e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3),liquidity_fraction=liquidity_fraction)
                 audit(desk,run_id,selected,'post_size',entry_size)
             elif desk.rules.paper_fixed_fraction:
-                entry_size=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction)
+                entry_size=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction)
                 audit(desk,run_id,selected,'post_size',entry_size)
             else:
                 audit(desk,run_id,selected,'post_size',dict(reason='missing_fresh_explicit_kelly_inputs'));selected=None

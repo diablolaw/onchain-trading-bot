@@ -71,6 +71,9 @@ class Rules:
     max_quote_network_lamports: int = 5000000
     # Paper-only post-profile additions; zero keeps the earlier behaviour.
     paper_fixed_fraction: float = 0
+    # The post's 6% bank cap and the 3% round-trip fee ceiling, adjustable for small-bank profiles.
+    max_bank_fraction: float = .06
+    max_roundtrip_fee_pct: float = 3
     rug_liquidity_drop_pct: float = 0
     whale_hold_max_seconds: int = 0
     retest_add_fraction: float = 0
@@ -105,8 +108,9 @@ class Rules:
                 raise ValueError(f'{name} must be <= 100')
         if self.max_quote_slippage_bps > 10000 or self.max_quote_fee_bps > 10000:
             raise ValueError('quote slippage and fee limits must be <= 10000 bps')
-        if self.paper_fixed_fraction > .06 or self.rug_liquidity_drop_pct > 100 or self.retest_add_fraction > 1:
-            raise ValueError('paper fraction must be <= 6%, liquidity drop <= 100% and retest add <= 1')
+        if (self.max_bank_fraction > 1 or self.paper_fixed_fraction > self.max_bank_fraction
+                or self.rug_liquidity_drop_pct > 100 or self.retest_add_fraction > 1):
+            raise ValueError('paper fraction must be <= max_bank_fraction <= 1, liquidity drop <= 100% and retest add <= 1')
 
     @property
     def version(self):
@@ -458,7 +462,7 @@ class Desk:
         fee = usd(max(money(r.minimum_fee_usd), cost * money(r.fee_bps) / 10000 + money(r.fixed_fee_usd)))
         cash = money(self.db.execute('SELECT cash FROM account').fetchone()[0])
         exposure = sum((money(x['cost']) for x in self.open_positions()), Decimal(0))
-        if cost <= 0 or cash < cost + fee or exposure + cost + fee > money(r.max_exposure) or fee * 2 / cost * 100 > 3:
+        if cost <= 0 or cash < cost + fee or exposure + cost + fee > money(r.max_exposure) or fee * 2 / cost * 100 > money(r.max_roundtrip_fee_pct):
             self.log(run_id, sid, now, 'SIZE', 'skip', ['retest_add_not_viable'])
             return
         fill_price = price * (1 + money(r.slippage_bps) / 10000)

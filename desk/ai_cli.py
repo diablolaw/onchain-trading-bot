@@ -32,6 +32,7 @@ def add_commands(parser, sub):
     runner.add_argument('--worldmonitor-url')
     runner.add_argument('--sizing-file')
     runner.add_argument('--observe-only',action='store_true')
+    runner.add_argument('--paper-config',default='post-paper.config.json',help='Paper rules for this account, e.g. post-paper-100.config.json')
     runner.add_argument('--social-port',type=int,help='Also supervise the social-only Grok evidence service on this loopback port (tunnel runs separately)')
     book=sub.add_parser('book-scan',help='Original BOOK public quotes and explicitly supplied forecasts; no orders')
     book.add_argument('--forecasts-file')
@@ -74,7 +75,7 @@ def run(args,desk):
     from .cli import monitor
     if args.command=='post-run':
         from .supervisor import run as supervise
-        return supervise(args.post_db,args.decision_interval,args.worldmonitor_url,args.sizing_file,args.observe_only,args.social_port)
+        return supervise(args.post_db,args.decision_interval,args.worldmonitor_url,args.sizing_file,args.observe_only,args.social_port,args.paper_config)
     if args.command=='book-scan':
         from .books import collect as collect_books,evaluate as evaluate_books
         if not math.isfinite(args.max_spread) or not 0<=args.max_spread<=1 or not math.isfinite(args.max_ticket) or args.max_ticket<=0:raise ValueError('invalid book limits')
