@@ -1,0 +1,9 @@
+{
+  "jev_model": "jev-latest",
+  "grok_model": "grok-4.7",
+  "max_candidates": 3,
+  "max_calls": 7,
+  "min_probability": 0.8,
+  "min_confidence": 0.7,
+  "max_state_bytes": 24000
+}

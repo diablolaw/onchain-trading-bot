@@ -1,0 +1,23 @@
+{
+  "initial_cash": 1000,
+  "ticket": 25,
+  "max_positions": 5,
+  "max_exposure": 125,
+  "min_liquidity": 50000,
+  "min_age_hours": 6,
+  "max_age_hours": 720,
+  "min_volume_24h": 10000,
+  "max_top_owner_pct": 10,
+  "max_top10_owner_pct": 35,
+  "max_snapshot_age": 120,
+  "max_holder_age": 3600,
+  "fee_bps": 30,
+  "slippage_bps": 100,
+  "fixed_fee_usd": 0.05,
+  "max_ticket_liquidity_pct": 0.1,
+  "stop_loss_pct": 15,
+  "take_profit_pct": 30,
+  "max_hold_seconds": 86400,
+  "volume_exit_ratio": 0.2,
+  "cooldown_seconds": 3600
+}

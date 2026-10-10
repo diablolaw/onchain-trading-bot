@@ -1,0 +1,9 @@
+{
+  "judgment_profile": "post",
+  "jev_model": "jev-latest",
+  "max_candidates": 3,
+  "max_calls": 10,
+  "min_probability": 0.6,
+  "min_confidence": 0.55,
+  "max_state_bytes": 24000
+}

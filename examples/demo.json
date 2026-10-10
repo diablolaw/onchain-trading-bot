@@ -1,0 +1,89 @@
+[
+  {
+    "observed_at": 1800000000,
+    "pair": {
+      "chainId": "solana",
+      "dexId": "demo",
+      "pairAddress": "DemoPool11111111111111111111111111111",
+      "baseToken": {
+        "address": "DemoMint11111111111111111111111111111",
+        "symbol": "DEMO"
+      },
+      "priceUsd": "1",
+      "liquidity": {
+        "usd": 100000
+      },
+      "volume": {
+        "h6": 10000,
+        "h24": 40000
+      },
+      "pairCreatedAt": 1799913600000
+    },
+    "holders": {
+      "token": "DemoMint11111111111111111111111111111",
+      "observed_at": 1800000000,
+      "source": "synthetic demo",
+      "method": "owner_aggregated",
+      "top_owner_pct": 5,
+      "top10_owner_pct": 25
+    }
+  },
+  {
+    "observed_at": 1800000015,
+    "pair": {
+      "chainId": "solana",
+      "dexId": "demo",
+      "pairAddress": "DemoPool11111111111111111111111111111",
+      "baseToken": {
+        "address": "DemoMint11111111111111111111111111111",
+        "symbol": "DEMO"
+      },
+      "priceUsd": "1.05",
+      "liquidity": {
+        "usd": 100000
+      },
+      "volume": {
+        "h6": 10000,
+        "h24": 40000
+      },
+      "pairCreatedAt": 1799913600000
+    },
+    "holders": {
+      "token": "DemoMint11111111111111111111111111111",
+      "observed_at": 1800000015,
+      "source": "synthetic demo",
+      "method": "owner_aggregated",
+      "top_owner_pct": 5,
+      "top10_owner_pct": 25
+    }
+  },
+  {
+    "observed_at": 1800000030,
+    "pair": {
+      "chainId": "solana",
+      "dexId": "demo",
+      "pairAddress": "DemoPool11111111111111111111111111111",
+      "baseToken": {
+        "address": "DemoMint11111111111111111111111111111",
+        "symbol": "DEMO"
+      },
+      "priceUsd": "1.1",
+      "liquidity": {
+        "usd": 100000
+      },
+      "volume": {
+        "h6": 100,
+        "h24": 40000
+      },
+      "pairCreatedAt": 1799913600000
+    },
+    "holders": {
+      "token": "DemoMint11111111111111111111111111111",
+      "observed_at": 1800000030,
+      "source": "synthetic demo",
+      "method": "owner_aggregated",
+      "top_owner_pct": 5,
+      "top10_owner_pct": 25
+    }
+  }
+]

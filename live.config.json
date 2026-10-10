@@ -1,0 +1,15 @@
+{
+  "ticket_usdc": 5,
+  "max_wallet_usdc": 50,
+  "max_wallet_sol_lamports": 30000000,
+  "max_positions": 1,
+  "max_exposure_usdc": 5,
+  "daily_loss_usdc": 2,
+  "daily_network_lamports": 5000000,
+  "min_sol_reserve_lamports": 5000000,
+  "max_network_lamports": 3000000,
+  "max_priority_fee_lamports": 100000,
+  "slippage_bps": 100,
+  "max_price_impact_pct": 1,
+  "order_max_age_seconds": 30
+}

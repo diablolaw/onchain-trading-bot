@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onchain-trading-desk"
+version = "0.1.0"
+description = "Auditable Solana discovery and paper trading"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+live = ["solders==0.29.0"]
+
+[project.scripts]
+trading-desk = "desk.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["desk*"]
