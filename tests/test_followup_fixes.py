@@ -217,3 +217,21 @@ class SocialDefer(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SmallBankProfile(unittest.TestCase):
+    def test_hundred_dollar_profile_sizes_full_evidence_and_blocks_fee_heavy_partials(self):
+        import json
+        from desk.supervisor import validate_entry_setup
+        root = Path(__file__).resolve().parents[1]
+        config = root / 'post-paper-100.config.json'
+        r = Rules(**json.loads(config.read_text()))
+        self.assertEqual(r.initial_cash, 100)
+        full = fixed_size(100, 100, r.paper_fixed_fraction, 100000, liquidity_fraction=r.max_ticket_liquidity_pct / 100,
+                          max_fee_pct=r.max_roundtrip_fee_pct, max_fraction=r.max_bank_fraction)
+        self.assertEqual(full['dollars'], 40)
+        partial = fixed_size(100, 100, r.paper_fixed_fraction, 100000, partial=True, liquidity_fraction=r.max_ticket_liquidity_pct / 100,
+                             max_fee_pct=r.max_roundtrip_fee_pct, max_fraction=r.max_bank_fraction)
+        self.assertEqual(partial['dollars'], 0)
+        with tempfile.TemporaryDirectory() as d:
+            validate_entry_setup(root, str(Path(d) / 'small.sqlite'), None, config)

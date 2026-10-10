@@ -30,13 +30,13 @@ def size(free_cash,bank,probability,payoff,liquidity,partial=False,dark=False,lo
     return finish(free_cash,bank,fraction,liquidity,partial,dark,locked_cash,operating_reserve,max_fee_pct,liquidity_fraction,'explicit_kelly_inputs')
 
 
-def fixed_size(free_cash,bank,fraction,liquidity,partial=False,dark=False,locked_cash=0,operating_reserve=0,max_fee_pct=3,liquidity_fraction=.02):
+def fixed_size(free_cash,bank,fraction,liquidity,partial=False,dark=False,locked_cash=0,operating_reserve=0,max_fee_pct=3,liquidity_fraction=.02,max_fraction=.06):
     """Paper-only fixed fraction of the bank while no calibrated p/payoff exists.
 
     Not Kelly: Jev confidence is never used as a win probability. Same 6% cap, liquidity cap,
     partial cut and fee check as the Kelly path, so shadow results stay comparable."""
     values=(free_cash,bank,fraction,liquidity,locked_cash,operating_reserve,max_fee_pct,liquidity_fraction)
-    if any(type(x) not in (int,float) or not math.isfinite(x) or x<0 for x in values) or not 0<fraction<=.06:raise ValueError('invalid paper fixed fraction inputs')
+    if any(type(x) not in (int,float) or not math.isfinite(x) or x<0 for x in values) or not 0<fraction<=max_fraction<=1:raise ValueError('invalid paper fixed fraction inputs')
     return finish(free_cash,bank,fraction,liquidity,partial,dark,locked_cash,operating_reserve,max_fee_pct,liquidity_fraction,'paper_fixed_fraction_assumption')
 
 
