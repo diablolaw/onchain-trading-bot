@@ -18,3 +18,4 @@ data/
 *wallet*
 *.keypair.json
 __pycache__/
+integrations/worldmonitor/
