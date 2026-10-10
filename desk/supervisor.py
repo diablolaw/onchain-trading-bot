@@ -92,7 +92,10 @@ def validate_entry_setup(root,db,sizing_file):
         from .post_policy import fixed_size
         # Pools at least ten times the minimum liquidity must be sizeable after the partial cut.
         result=fixed_size(cash,cash,r.paper_fixed_fraction,r.min_liquidity*10,partial=True,liquidity_fraction=r.max_ticket_liquidity_pct/100)
-        if not 0<result['dollars']<=r.ticket:raise ValueError('paper_fixed_fraction is not viable for current cash, ticket cap, liquidity cap and fee ceiling; use --observe-only or correct the configuration')
+        if not 0<result['dollars']<=r.ticket:
+            # With the $0.95 fee floor and 3% round-trip ceiling, a partial ticket needs about $63,
+            # so a 1.5% fraction needs roughly $7,000 of paper cash.
+            raise ValueError(f'paper_fixed_fraction is not viable: account cash is ${cash:,.2f} in {db}; a {r.paper_fixed_fraction:.1%} partial ticket of ${result["dollars"] if result["dollars"] else cash*r.paper_fixed_fraction*.6:,.2f} fails the fee ceiling. Start a fresh ${r.initial_cash:,.0f} account with --post-db data/<new>.sqlite, or use --observe-only')
         return
     data=json.loads(Path(sizing_file).read_text())
     if not isinstance(data,dict) or not data:raise ValueError('sizing file must contain sourced per-token forecasts')
