@@ -44,6 +44,13 @@ class WorldMonitor:
         except Exception as e:result['prediction']=dict(available=False,error_type=type(e).__name__)
         result['ready']=not result['degraded'] and result['prediction']['available']
         return result
+    def ready_with_retries(self,attempts=10,delay=3,sleep=time.sleep):
+        result=None
+        for attempt in range(attempts):
+            result=self.health()
+            if result['ready']:break
+            if attempt+1<attempts:sleep(delay)
+        return dict(result,attempts=attempt+1)
 
 
 def fresh(value,now,max_age):

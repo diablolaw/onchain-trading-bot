@@ -216,10 +216,21 @@ class SolanaRPC:
         return mint, owner_evidence(token, mint, result, stamp)
 
 
+# Shared AMM vault authorities whose token accounts hold pool reserves, not a trader's bag.
+# Pools that own their vaults directly (PumpSwap, Raydium CLMM, Orca, Meteora DLMM) are matched
+# by the traded pair address instead. Anything not identified stays in the measurement.
+POOL_AUTHORITIES = {
+    '5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1': 'raydium_amm_v4_authority',
+    'GpMZbSM2GgvTKHJirzeGfMFoaZ8UR2X7F4v8vHTvxFbL': 'raydium_cpmm_authority',
+}
+
+
 class PostSolanaRPC(SolanaRPC):
-    """Guide's largest-token-account concentration; never guessed vault exclusions."""
+    """Guide's largest-token-account concentration, with identified pool vaults labelled and excluded."""
+    pool_owners = POOL_AUTHORITIES
+
     def call(self, method, params):
-        if method not in ('getTokenLargestAccounts','getTokenSupply'):
+        if method not in ('getTokenLargestAccounts','getTokenSupply','getMultipleAccounts'):
             return super().call(method,params)
         data,stamp=self.http.request(self.url,payload=dict(jsonrpc='2.0',id=1,method=method,params=params))
         self.recorder('solana:'+method,data,stamp)
@@ -227,7 +238,7 @@ class PostSolanaRPC(SolanaRPC):
             raise ValueError('RPC error or invalid response; check provider support')
         return data['result'],stamp
 
-    def inspect(self,token):
+    def inspect(self,token,pool=None):
         result,stamp=self.call('getAccountInfo',[address(token),{'encoding':'jsonParsed','commitment':'confirmed'}])
         mint=mint_evidence(token,result,stamp,allow_transfer_fees=True,allow_mutable_metadata=self.allow_mutable_metadata)
         self.last_mint=mint
@@ -238,7 +249,51 @@ class PostSolanaRPC(SolanaRPC):
         if supply!=uint(mint['supply']) or uint(supply_result['value']['decimals'])!=mint['decimals'] or slot(supply_result)<mint['slot']:
             raise ValueError('mint and token supply evidence mismatch')
         largest,stamp=self.call('getTokenLargestAccounts',[token,{'commitment':'confirmed'}])
-        return mint,largest_account_evidence(token,mint,largest,stamp)
+        holders=largest_account_evidence(token,mint,largest,stamp)
+        if pool:
+            accounts=[row['account'] for row in holders['top_accounts'][:20]]
+            owners,_=self.call('getMultipleAccounts',[accounts,{'encoding':'jsonParsed','commitment':'confirmed'}])
+            holders=exclude_pool_vaults(holders,mint,owners,address(pool),self.pool_owners)
+        return mint,holders
+
+    def owners(self,token,accounts):
+        """Owner of each token account, for RISK's whale-distribution check."""
+        result,_=self.call('getMultipleAccounts',[accounts,{'encoding':'jsonParsed','commitment':'confirmed'}])
+        return token_account_owners(token,accounts,result)
+
+
+def token_account_owners(token,accounts,result):
+    rows=result.get('value') if isinstance(result,dict) else None
+    if not isinstance(rows,list) or len(rows)!=len(accounts):
+        raise ValueError('invalid token account owner evidence')
+    owners={}
+    for account,row in zip(accounts,rows):
+        if row is None:continue
+        info=parsed_account(row,'account')
+        if info.get('mint')!=token:raise ValueError('token account mint mismatch')
+        owners[account]=address(info['owner'])
+    return owners
+
+
+def exclude_pool_vaults(holders,mint,result,pool,authorities):
+    """Recompute concentration without token accounts owned by the traded pool or a known AMM authority.
+
+    Raw figures stay in the evidence. An account whose owner cannot be read is kept, never guessed."""
+    accounts=[row['account'] for row in holders['top_accounts'][:20]]
+    owners=token_account_owners(holders['token'],accounts,result)
+    supply=Decimal(uint(mint['supply']));kept=[];exclusions=[]
+    for row in holders['top_accounts']:
+        owner=owners.get(row['account'])
+        label='traded_pool' if owner==pool else authorities.get(owner)
+        row=dict(row,owner=owner)
+        if label:exclusions.append(dict(row,reason=label))
+        else:kept.append(row)
+    if not kept:raise ValueError('no non-vault holder accounts in largest-account evidence')
+    return dict(holders,top_accounts=kept,exclusions=exclusions,pool=pool,
+        source=holders['source']+'+getMultipleAccounts:vault_exclusion',
+        raw_top_account_pct=holders['top_account_pct'],raw_top10_account_pct=holders['top10_account_pct'],
+        top_account_pct=float(Decimal(int(kept[0]['amount']))*100/supply),
+        top10_account_pct=float(Decimal(sum(int(r['amount']) for r in kept[:10]))*100/supply))
 
 
 def largest_account_evidence(token,mint,result,stamp):

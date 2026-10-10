@@ -11,7 +11,9 @@ def request(desk,token,handle):
     desk.db.executescript(SCHEMA)
     handle=clean_handle(handle)
     if not handle:return None
-    with desk.db:desk.db.execute('INSERT OR REPLACE INTO social_jobs VALUES (?,?,?)',(token,handle,time.time()))
+    now=time.time()
+    # Keep the original request time while the job is live, so callers can bound how long they wait.
+    with desk.db:desk.db.execute('INSERT INTO social_jobs VALUES (?,?,?) ON CONFLICT(token) DO UPDATE SET at=CASE WHEN lower(handle)=lower(excluded.handle) AND at>=? THEN at ELSE excluded.at END,handle=excluded.handle',(token,handle,now,now-3600))
     row=desk.db.execute('SELECT data FROM social_evidence WHERE token=? AND lower(handle)=lower(?) AND observed_at>=? AND observed_at<=?',(token,handle,time.time()-3600,time.time())).fetchone()
     return json.loads(row[0]) if row else None
 
@@ -37,3 +39,9 @@ def submit(db,data):
         db.execute('INSERT OR REPLACE INTO social_evidence VALUES (?,?,?,?)',(token,handle,stamp,encode(evidence)))
         db.execute('DELETE FROM social_jobs WHERE token=?',(token,))
     return dict(accepted=True,token=token)
+
+
+def requested_at(desk,token):
+    desk.db.executescript(SCHEMA)
+    row=desk.db.execute('SELECT at FROM social_jobs WHERE token=?',(token,)).fetchone()
+    return row[0] if row else None

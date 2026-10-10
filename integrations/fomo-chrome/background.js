@@ -95,12 +95,15 @@ async function poll() {
           redirect: 'error', signal: AbortSignal.timeout(20000)
         });
         if (response.status === 401 || response.status === 403) {authorization = null; cookieSessionObserved = false; await chrome.storage.session.remove(['fomoAuthorization','cookieSessionObserved']); throw new Error('session_expired_reload_fomo');}
+        // 431: the request's headers (in cookie-only mode, Chrome's fomo.family cookies) are too large.
+        // Reloading FOMO captures a bearer session, which omits cookies on these requests.
+        if (response.status === 431) throw new Error(authorization ? 'fomo_http_431' : 'fomo_headers_too_large_reload_fomo');
         if (!response.ok) throw new Error('fomo_http_' + response.status);
         const raw = await response.text();
         if (raw.length > 262144) throw new Error('response_too_large');
         result.rows = rowsFrom(JSON.parse(raw), job.tokens);
       } catch (e) {
-        const allowed = ['session_not_observed_reload_fomo','session_expired_reload_fomo','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','fomo_api_rejected'];
+        const allowed = ['session_not_observed_reload_fomo','session_expired_reload_fomo','fomo_headers_too_large_reload_fomo','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','fomo_api_rejected'];
         if (e.structure) result.structure = e.structure;
         result.error = allowed.includes(e.message) || /^fomo_http_\d{3}$/.test(e.message) ? e.message : 'market_request_failed';
       }

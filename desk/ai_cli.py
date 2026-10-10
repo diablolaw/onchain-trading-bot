@@ -32,6 +32,7 @@ def add_commands(parser, sub):
     runner.add_argument('--worldmonitor-url')
     runner.add_argument('--sizing-file')
     runner.add_argument('--observe-only',action='store_true')
+    runner.add_argument('--social-port',type=int,help='Also supervise the social-only Grok evidence service on this loopback port (tunnel runs separately)')
     book=sub.add_parser('book-scan',help='Original BOOK public quotes and explicitly supplied forecasts; no orders')
     book.add_argument('--forecasts-file')
     book.add_argument('--max-spread',type=float,default=.05)
@@ -73,7 +74,7 @@ def run(args,desk):
     from .cli import monitor
     if args.command=='post-run':
         from .supervisor import run as supervise
-        return supervise(args.post_db,args.decision_interval,args.worldmonitor_url,args.sizing_file,args.observe_only)
+        return supervise(args.post_db,args.decision_interval,args.worldmonitor_url,args.sizing_file,args.observe_only,args.social_port)
     if args.command=='book-scan':
         from .books import collect as collect_books,evaluate as evaluate_books
         if not math.isfinite(args.max_spread) or not 0<=args.max_spread<=1 or not math.isfinite(args.max_ticket) or args.max_ticket<=0:raise ValueError('invalid book limits')
@@ -198,11 +199,17 @@ def run(args,desk):
                 candidates=[] if open_tokens else exclude(desk,candidates)
                 discovery['skipped_before_collection']=before-len(candidates)
                 discovery['holding_position']=bool(open_tokens)
-            world_context=None
+            world_context=None;entries_blocked=None
             if getattr(args,'worldmonitor_url',None):
                 from .worldmonitor import WorldMonitor
-                world_context=WorldMonitor(args.worldmonitor_url).context()
-                recorder('worldmonitor:context',world_context,time.time())
+                monitor_client=WorldMonitor(args.worldmonitor_url)
+                # CHIEF's gate: three green checks, 10 attempts 3s apart. Down means no new entries; RISK continues.
+                health=monitor_client.ready_with_retries()
+                recorder('worldmonitor:health',health,time.time())
+                world_context=dict(health,degraded=not health['ready'])
+                if not health['ready']:
+                    entries_blocked='worldmonitor_not_ready'
+                    discovery_error=discovery_error or 'worldmonitor_not_ready'
             fomo_metrics={}
             if bridge:
                 from .fomo import collect_batches
@@ -278,7 +285,7 @@ def run(args,desk):
                         snapshot['early_rejection_reasons']=['dossier_budget_deferred']
                     if not cheap and dossiers<min(args.limit,policy.max_candidates):
                         dossiers+=1
-                        evidence = collect(token,desk.rules,rpc,jupiter,check_quotes=policy.judgment_profile!='post')
+                        evidence = collect(token,desk.rules,rpc,jupiter,check_quotes=policy.judgment_profile!='post',pool=snapshot['pair'])
                         if evidence.get('holders') and fomo_metrics.get(token):
                             evidence['holders']['owner_count']=fomo_metrics[token]['holder_count']
                             evidence['holders']['owner_count_source']='fomo:filterTokens'
@@ -288,8 +295,9 @@ def run(args,desk):
                                 indexed=gecko.token_info(token)
                                 snapshot['indexed_dossier']=indexed
                                 if policy.judgment_profile=='post':
-                                    from .social import request as social_request
+                                    from .social import request as social_request,requested_at
                                     snapshot['social_evidence']=social_request(desk,token,indexed.get('x_handle'))
+                                    snapshot['social_job']=dict(requested_at=requested_at(desk,token))
                                 if indexed['holder_count'] is not None:
                                     evidence['holders']['owner_count']=indexed['holder_count']
                                     evidence['holders']['owner_count_source']=indexed['source']
@@ -347,7 +355,7 @@ def run(args,desk):
                 fresh['discovery']=snapshot.get('discovery')
                 if bridge:
                     fresh=fomo_enrich(fresh,bridge.tokens([snapshot['token']])[snapshot['token']])
-                evidence=collect(snapshot['token'],desk.rules,rpc,jupiter)
+                evidence=collect(snapshot['token'],desk.rules,rpc,jupiter,pool=snapshot['pair'])
                 # Preserve indexed count only while its original timestamp remains fresh.
                 old=snapshot.get('holders') or {}
                 if evidence.get('holders') and old.get('owner_count_observed_at') and 0<=time.time()-old['owner_count_observed_at']<=desk.rules.max_holder_age:
@@ -362,6 +370,7 @@ def run(args,desk):
                 snapshot['world_context']=world_context
                 snapshot['sizing_evidence']=sizing.get(snapshot['token']) if isinstance(sizing,dict) and not getattr(args,'observe_only',False) else None
                 snapshot['observe_only']=getattr(args,'observe_only',False)
+                snapshot['entries_blocked']=entries_blocked
             result = evaluate(desk,run_id,snapshots,AIProviders(recorder,policy),policy,refresh_selected=refresh_selected)
             discovery['market_observations']=len(snapshots)
             discovery['market_passed']=sum(not any(r in ('invalid_identity','stale_market_data','missing_price','low_or_missing_liquidity','pair_age_out_of_range','low_or_missing_volume','market_cap_missing','market_cap_out_of_range','trade_count_missing','too_few_trades','sell_activity_missing','buys_without_sells') for r in s.get('early_rejection_reasons',[])) for s in snapshots)
@@ -370,6 +379,9 @@ def run(args,desk):
             result['discovery'] = discovery
             if discovery_error and result['state']=='complete':
                 result['state'] = 'degraded'
+            if policy.judgment_profile=='post':
+                from .reporting import after_cycle
+                result['telegram']=after_cycle(desk,result)
             with desk.db:
                 desk.db.execute('UPDATE ai_cycles SET state=?,summary=? WHERE run_id=?',(result['state'],encode(result),run_id))
             if args.command=='ai-scan':

@@ -87,10 +87,12 @@ class ReviewFixes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/'forecasts.json';path.write_text(json.dumps({TOKEN:dict(probability=.8,payoff=1,source='test',observed_at=time.time())}))
             validate_entry_setup(root,Path(d)/'new.sqlite',path)
-            with self.assertRaisesRegex(ValueError,'sizing-file'):validate_entry_setup(root,Path(d)/'new.sqlite',None)
+            # The post profile's paper fixed fraction allows entry startup without a sizing file.
+            validate_entry_setup(root,Path(d)/'new.sqlite',None)
             old=Desk(Path(d)/'old.sqlite',Rules(initial_cash=1000))
             old.close()
             with self.assertRaisesRegex(ValueError,'viable'):validate_entry_setup(root,Path(d)/'old.sqlite',path)
+            with self.assertRaisesRegex(ValueError,'viable'):validate_entry_setup(root,Path(d)/'old.sqlite',None)
 
     def test_context_rejects_empty_stale_and_projects_large_payload(self):
         endpoint='/api/intelligence/v1/get-social-velocity'
