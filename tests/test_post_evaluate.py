@@ -48,7 +48,8 @@ class PostEvaluateTests(unittest.TestCase):
                     result=evaluate(desk,run,[s],provider,AIPolicy(judgment_profile='post',max_calls=10),refresh_selected=refresh)
                     self.assertEqual(result['state'],'complete')
                     self.assertEqual(result['paper_buys'],expected)
-                    self.assertEqual(provider.calls,3)
+                    # Market and chain only: a single survivor skips the pick call.
+                    self.assertEqual(provider.calls,2)
                     if expected:
                         self.assertEqual(float(desk.open_positions()[0]['cost']),36.95)
                         self.assertEqual(desk.rules.ticket,60)

@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 PROJECT_ENV = Path(__file__).resolve().parent.parent / '.env'
-ALLOWED = {'TYPESAFE_API_KEY', 'XAI_API_KEY', 'JUPITER_API_KEY', 'SOLANA_RPC_URL'}
+ALLOWED = {'TYPESAFE_API_KEY', 'XAI_API_KEY', 'JUPITER_API_KEY', 'SOLANA_RPC_URL', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'}
 
 
 def load_env(path=PROJECT_ENV):

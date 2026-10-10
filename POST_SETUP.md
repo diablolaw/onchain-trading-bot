@@ -43,6 +43,39 @@ kept distinct. Your existing `data/ai-paper.sqlite` account is unchanged.
 The Jev integration was tested with a real small request. Actual model:
 `jev-1.13.0`; 388 input / 76 output tokens. No trades were made.
 
+## 10 October follow-up fixes (paper only)
+
+These address the review in `reviews/desk-vs-savipww-review.md`. In 54 cycles before them, Jev was never called: every
+free-cut survivor failed the 5% largest-account rule, and no entry path existed without a per-mint sizing file.
+
+- **Pool vaults.** The largest-account check now reads each top account's owner (`getMultipleAccounts`) and excludes
+  accounts owned by the traded pair (PumpSwap, CLMM, Orca, DLMM vaults) or a known AMM authority (Raydium v4, CPMM).
+  Raw figures stay in the evidence as `raw_top_account_pct`; unreadable owners stay in the measurement.
+- **Sizing.** `paper_fixed_fraction` (1.5% of the bank) sizes paper entries when no sourced p/payoff exists. It is
+  labelled `paper_fixed_fraction_assumption`, keeps the 6% cap, partial cut and fee check, and never uses Jev confidence.
+  A `--sizing-file` still takes precedence. `--observe-only` still records judgments without entries.
+- **Ticket vs price impact.** `max_ticket_liquidity_pct` is 0.5% (was 2%): a 2% ticket is about 4% of one side of a
+  constant-product pool, which the 1% price-impact quote check would reject.
+- **Exits.** The volume trigger is normalized for pair age (h1 window under 6 hours, true 6-hour average under 24 hours).
+  A paper rug guard closes when liquidity falls 50% below entry. The post's own `h6/(h24/4)` is unchanged for pairs over 24h.
+- **Whale hold.** RISK reads the largest non-vault accounts every check. A volume-decay close waits while an account above
+  5% is selling, for at most 30 minutes; liquidity-collapse and failed-data closes never wait.
+- **Retest add.** One paper add of 50% of the original cost after a +50% peak, a 20% pullback that stays 20% above entry,
+  and healthy volume. "Retest" is undefined in the post; these numbers are assumptions. No fresh execution quote exists in RISK.
+- **Discovery.** GeckoTerminal trending pools join new pools every five minutes.
+- **Social.** A candidate with a published X handle waits up to 30 minutes for Grok evidence before it is judged without it.
+  `post-run --social-port 8081` supervises the social-only service; the HTTPS tunnel still runs separately.
+- **Bench.** Durations follow the post per reason: top wallet and sell side are permanent; failed evidence is 45 minutes.
+- **Judging.** One judge failure skips that candidate without benching it; a single survivor skips the pick, as in the post.
+- **WorldMonitor gate.** With `--worldmonitor-url`, entries require three green checks (10 attempts, 3 seconds apart).
+  Without a URL, WorldMonitor state is recorded but no longer cuts every size by 0.6; that cut is for "no usable X".
+- **Telegram.** Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` to `.env` yourself. The desk then sends a line per cycle,
+  an end-of-day summary and >10% equity moves. Unset, it records `not_configured`.
+- **FOMO 431.** The extension now reports `fomo_headers_too_large_reload_fomo` in cookie-only mode. Reload the extension,
+  then reload fomo.family so a bearer session is captured; bearer requests omit cookies.
+
+Still not built: BOOK portfolio, BSC/Base/Robinhood collectors, FOMO execution (live), and WorldMonitor seed data.
+
 ## Start the new isolated paper profile
 
 Stop your old scanner and any standalone fomo-bridge/judge service first to free

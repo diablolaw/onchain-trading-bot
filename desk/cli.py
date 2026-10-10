@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .core import Desk, Rules, normalize
 from .scanner import DexScreener, best_pair
-from .onchain import SolanaRPC, address
+from .onchain import SolanaRPC, PostSolanaRPC, address
 from .preflight import collect, quote_reasons
 from .quotes import Jupiter
 from . import live_cli, ai_cli
@@ -29,10 +29,18 @@ def fixture(desk, path):
     return desk.report(events[-1]['observed_at'] if events else time.time())
 
 
-def monitor(desk, scanner, run_id):
+def monitor(desk, scanner, run_id, rpc=None):
     # Always pinned to the entry pair; liquidity-based pair selection cannot
     # switch the price used to value an existing position.
     for position in desk.open_positions():
+        whale = None
+        if rpc is not None and desk.rules.whale_hold_max_seconds:
+            from .whale import check as whale_check
+            try:
+                whale = whale_check(desk, rpc, position['token'], position['pair'])
+            except Exception as error:
+                # Missing whale evidence never delays an exit.
+                desk.raw(run_id, 'risk_whale_error', {'pair': position['pair'], 'error_type': type(error).__name__}, time.time())
         attempts=3 if desk.rules.exit_policy=='post_volume' else 1
         for attempt in range(attempts):
             try:
@@ -40,6 +48,8 @@ def monitor(desk, scanner, run_id):
                 pending=desk.db.execute('SELECT 1 FROM risk_close_intents WHERE pair=?',(position['pair'],)).fetchone()
                 if desk.rules.exit_policy=='post_volume' and (snapshot.get('price') is None or (not pending and (snapshot.get('volume_6h') is None or snapshot.get('volume_24h') is None))):
                     raise ValueError('incomplete post exit evidence')
+                if whale is not None:
+                    snapshot['whale'] = whale
                 desk.record(run_id, snapshot, time.time(), enter=False)
                 break
             except Exception as error:
@@ -58,7 +68,8 @@ def live_cycle(desk, kind, limit, holder_path):
     scanner = DexScreener(lambda source, data, stamp: desk.raw(run_id, source, data, stamp))
     recorder = lambda source, data, stamp: desk.raw(run_id, source, data, stamp)
     rpc, jupiter = SolanaRPC(recorder), Jupiter(recorder)
-    monitor(desk, scanner, run_id)
+    whale_rpc = PostSolanaRPC(recorder) if desk.rules.whale_hold_max_seconds else None
+    monitor(desk, scanner, run_id, whale_rpc)
     if kind == 'risk':
         return
     evidence = json.loads(Path(holder_path).read_text()) if holder_path else {}

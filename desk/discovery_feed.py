@@ -32,6 +32,8 @@ def poll(desk,queries,scanner=None,now=None,gecko=None):
         if last is None or stamp-last[0]>=300:
             try:launches=gecko.new_pools()
             except Exception as error:failed.append(dict(query='geckoterminal',error_type=type(error).__name__))
+            try:launches=launches+gecko.trending_pools()
+            except Exception as error:failed.append(dict(query='geckoterminal_trending',error_type=type(error).__name__))
             with desk.db:desk.db.execute("INSERT OR REPLACE INTO launch_sources VALUES ('gecko',?)",(stamp,))
     for query in queries:
         try:

@@ -118,7 +118,7 @@ class Bridge:
                 result=item['result']
                 if result.get('error'):
                     code=result['error']
-                    allowed={'session_not_observed_reload_fomo','session_expired_reload_fomo','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','market_request_failed','fomo_api_rejected'}
+                    allowed={'session_not_observed_reload_fomo','session_expired_reload_fomo','fomo_headers_too_large_reload_fomo','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','market_request_failed','fomo_api_rejected'}
                     import re
                     safe=code if isinstance(code,str) and (code in allowed or re.fullmatch(r'fomo_http_[0-9]{3}',code)) else 'unknown_bridge_error'
                     structure=result.get('structure')

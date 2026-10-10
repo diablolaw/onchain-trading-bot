@@ -22,14 +22,23 @@ class GeckoTerminal:
         self.http = http or JsonHTTP(spacing=6.1,attempts=2,max_bytes=2*1024*1024)
 
     def new_pools(self, pages=2):
+        return self.pools('new_pools', pages)
+
+    def trending_pools(self, pages=1):
+        """Pools already trading actively; launches alone rarely clear the liquidity and volume floors."""
+        return self.pools('trending_pools', pages)
+
+    def pools(self, listing, pages):
+        if listing not in ('new_pools','trending_pools'):
+            raise ValueError('unsupported GeckoTerminal pool listing')
         if type(pages) is not int or not 1 <= pages <= 2:
-            raise ValueError('new-pool pages must be 1 or 2')
+            raise ValueError('pool pages must be 1 or 2')
         pools = []
         seen = set()
         for page in range(1,pages+1):
-            payload,stamp = self.http.request(self.base+'/networks/solana/new_pools?page='+str(page),
+            payload,stamp = self.http.request(self.base+'/networks/solana/'+listing+'?page='+str(page),
                 headers={'Accept':'application/json;version=20230203'})
-            self.recorder('geckoterminal:new_pools:page:'+str(page),payload,stamp)
+            self.recorder('geckoterminal:'+listing+':page:'+str(page),payload,stamp)
             if not isinstance(payload,dict) or not isinstance(payload.get('data'),list) or payload.get('errors'):
                 raise ValueError('invalid GeckoTerminal new-pool response')
             if len(payload['data'])>20:

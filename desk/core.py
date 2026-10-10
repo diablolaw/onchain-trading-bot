@@ -69,6 +69,11 @@ class Rules:
     max_quote_fee_bps: float = 50
     max_roundtrip_loss_pct: float = 3
     max_quote_network_lamports: int = 5000000
+    # Paper-only post-profile additions; zero keeps the earlier behaviour.
+    paper_fixed_fraction: float = 0
+    rug_liquidity_drop_pct: float = 0
+    whale_hold_max_seconds: int = 0
+    retest_add_fraction: float = 0
 
     def __post_init__(self):
         for name, value in asdict(self).items():
@@ -85,7 +90,8 @@ class Rules:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or number(value) is None:
                 raise ValueError(f'{name} must be finite and nonnegative')
         for name in ('max_positions', 'max_snapshot_age', 'max_holder_age', 'max_hold_seconds', 'cooldown_seconds',
-                     'max_preflight_age', 'max_quote_slippage_bps', 'max_quote_network_lamports', 'min_trades_24h', 'min_holders'):
+                     'max_preflight_age', 'max_quote_slippage_bps', 'max_quote_network_lamports', 'min_trades_24h', 'min_holders',
+                     'whale_hold_max_seconds'):
             if not isinstance(getattr(self, name), int) or isinstance(getattr(self, name), bool):
                 raise ValueError(f'{name} must be an integer')
         if usd(self.ticket) <= 0 or usd(self.initial_cash) <= 0 or self.max_positions < 1:
@@ -99,6 +105,8 @@ class Rules:
                 raise ValueError(f'{name} must be <= 100')
         if self.max_quote_slippage_bps > 10000 or self.max_quote_fee_bps > 10000:
             raise ValueError('quote slippage and fee limits must be <= 10000 bps')
+        if self.paper_fixed_fraction > .06 or self.rug_liquidity_drop_pct > 100 or self.retest_add_fraction > 1:
+            raise ValueError('paper fraction must be <= 6%, liquidity drop <= 100% and retest add <= 1')
 
     @property
     def version(self):
@@ -146,6 +154,36 @@ def concentration(holders,rules):
     return tuple(number(holders.get(field)) for field in fields)
 
 
+def concentration_reasons(top,top10,rules):
+    # Keep the shared reason and name which limit failed, for reason-specific benches.
+    return ['owner_concentration']+(['top_wallet_concentration'] if top>rules.max_top_owner_pct else [])+(['top10_concentration'] if top10>rules.max_top10_owner_pct else [])
+
+
+def volume_ratio(s, now=None):
+    """Recent volume against the pair's own average, normalized for pairs younger than 24h.
+
+    The post's h6/(h24/4) assumes a full day of history. For a pair aged A<24h, h24 holds only A
+    hours, so that form reads 4 below six hours and inflates the ratio until 24 hours. Returns None
+    when the window cannot be measured yet (under one hour old, or missing fields)."""
+    h24 = number(s.get('volume_24h'))
+    if not h24:
+        return None
+    created = number(s.get('created_at'))
+    if created is None:
+        h6 = number(s.get('volume_6h'))
+        return h6 / (h24 / 4) if h6 is not None else None
+    age_h = ((s['observed_at'] if now is None else now) - created) / 3600
+    if age_h >= 6:
+        window, hours = number(s.get('volume_6h')), 6
+    elif age_h >= 1:
+        window, hours = number((s.get('volume_windows') or {}).get('h1')), 1
+    else:
+        return None
+    if window is None:
+        return None
+    return window / (h24 * hours / min(age_h, 24))
+
+
 def vet(snapshot, rules, now, *, check_quotes=True):
     """Pure, ordered rules. Unknown or invalid evidence rejects entry."""
     reasons = []
@@ -183,7 +221,7 @@ def vet(snapshot, rules, now, *, check_quotes=True):
     if top is None or top10 is None or not top <= top10 <= 100:
         reasons.append('invalid_owner_concentration')
     elif top > rules.max_top_owner_pct or top10 > rules.max_top10_owner_pct:
-        reasons.append('owner_concentration')
+        reasons.extend(concentration_reasons(top,top10,rules))
     if rules.require_preflight:
         from .preflight import preflight_reasons
         reasons.extend(preflight_reasons(s.get('token'), s.get('preflight'), rules, now, check_quotes=check_quotes))
@@ -215,6 +253,8 @@ class Desk:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(SCHEMA)
         self.db.execute('CREATE TABLE IF NOT EXISTS risk_close_intents(pair TEXT PRIMARY KEY,requested_at REAL NOT NULL,reason TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS risk_holds(pair TEXT PRIMARY KEY,since REAL NOT NULL,reason TEXT NOT NULL)')
+        self.db.execute('CREATE TABLE IF NOT EXISTS position_peaks(position_id INTEGER PRIMARY KEY,peak TEXT NOT NULL,added INTEGER NOT NULL)')
         with self.db:
             self.db.execute('INSERT OR IGNORE INTO metadata VALUES (?,?)', ('schema_version', '1'))
             self.db.execute('INSERT OR IGNORE INTO account VALUES (1,?)', (str(usd(rules.initial_cash)),))
@@ -328,12 +368,24 @@ class Desk:
             reason = 'take_profit'
         elif r.exit_policy=='pilot' and now - p['opened_at'] >= r.max_hold_seconds:
             reason = 'max_hold'
+        elif r.exit_policy=='post_volume' and r.rug_liquidity_drop_pct and self._liquidity_collapsed(p, s):
+            reason = 'liquidity_collapse'
+        elif r.exit_policy=='post_volume':
+            ratio = volume_ratio(s)
+            if ratio is not None and ratio < r.volume_exit_ratio:
+                reason = 'volume_decay'
         elif number(s.get('volume_24h')) is not None and s['volume_24h'] > 0 and number(s.get('volume_6h')) is not None:
             if s['volume_6h'] / (s['volume_24h'] / 4) < r.volume_exit_ratio:
                 reason = 'volume_decay'
+        if reason == 'volume_decay' and self._whale_hold(run_id, sid, p, s, now):
+            return
         if reason is None:
+            self.db.execute('DELETE FROM risk_holds WHERE pair=?', (s['pair'],))
+            if r.exit_policy == 'post_volume' and r.retest_add_fraction:
+                self._retest_add(run_id, sid, p, s, now)
             self.log(run_id, sid, now, 'RISK', 'hold', [])
             return
+        self.db.execute('DELETE FROM risk_holds WHERE pair=?', (s['pair'],))
         self.db.execute('DELETE FROM risk_close_intents WHERE pair=?',(s['pair'],))
         price = money(s['price']) * (1 - money(r.slippage_bps) / 10000)
         quantity = money(p['quantity'])
@@ -345,6 +397,77 @@ class Desk:
                         (now, str(proceeds), str(proceeds - money(p['cost'])), p['id']))
         self._fill(p['id'], sid, 'sell', now, price, quantity, fee, cash + proceeds)
         self.log(run_id, sid, now, 'RISK', 'sell', [reason])
+
+    def _entry_snapshot(self, position_id):
+        row = self.db.execute("SELECT s.data FROM fills f JOIN snapshots s ON s.id=f.snapshot_id WHERE f.position_id=? AND f.side='buy' ORDER BY f.id LIMIT 1", (position_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def _liquidity_collapsed(self, p, s):
+        """Paper rug guard: pool liquidity fell by the configured share since entry."""
+        entry = number(self._entry_snapshot(p['id']).get('liquidity'))
+        current = number(s.get('liquidity'))
+        return bool(entry) and current is not None and current < entry * (1 - self.rules.rug_liquidity_drop_pct / 100)
+
+    def _whale_hold(self, run_id, sid, p, s, now):
+        """Do not sell into a distributing whale, for at most whale_hold_max_seconds.
+
+        The post says both "close immediately" and "never sell into a distributing whale";
+        a bounded hold resolves that conflict. A liquidity collapse or failed-data close never waits."""
+        if not self.rules.whale_hold_max_seconds:
+            return False
+        whale = s.get('whale')
+        if whale is None:
+            # Another worker without chain evidence must not sell through RISK's active hold.
+            row = self.db.execute('SELECT since FROM risk_holds WHERE pair=?', (s['pair'],)).fetchone()
+            if not row or now - row[0] >= self.rules.whale_hold_max_seconds:
+                return False
+            whale = {}
+        else:
+            stamp = number(whale.get('observed_at'))
+            if whale.get('distributing') is not True or stamp is None or not 0 <= now - stamp <= self.rules.max_snapshot_age * 5:
+                return False
+            self.db.execute('INSERT OR IGNORE INTO risk_holds VALUES (?,?,?)', (s['pair'], now, 'whale_distribution'))
+        since = self.db.execute('SELECT since FROM risk_holds WHERE pair=?', (s['pair'],)).fetchone()[0]
+        if now - since >= self.rules.whale_hold_max_seconds:
+            return False
+        self.log(run_id, sid, now, 'RISK', 'hold', ['whale_distribution_hold', 'account:' + str(whale.get('account'))])
+        return True
+
+    def _retest_add(self, run_id, sid, p, s, now):
+        """One paper add on a retest after a confirmed +50% move.
+
+        The post allows one add "on a retest" without defining it. Assumption: the peak since entry
+        reached +50%, price has pulled back at least 20% from that peak, still sits at least 20% above
+        entry, and recent volume is not fading. Size is retest_add_fraction of the original cost,
+        within cash, exposure and liquidity limits. No fresh execution quote exists in the RISK path."""
+        r = self.rules
+        entry = money(p['entry_price'])
+        price = money(s['price'])
+        row = self.db.execute('SELECT peak,added FROM position_peaks WHERE position_id=?', (p['id'],)).fetchone()
+        peak = max(money(row[0]) if row else entry, price)
+        added = bool(row and row[1])
+        self.db.execute('INSERT INTO position_peaks VALUES (?,?,?) ON CONFLICT(position_id) DO UPDATE SET peak=excluded.peak',
+                        (p['id'], str(peak), int(added)))
+        if added or peak < entry * Decimal('1.5') or price > peak * Decimal('0.8') or price < entry * Decimal('1.2'):
+            return
+        ratio = volume_ratio(s)
+        if ratio is None or ratio < 0.5:
+            return
+        first_cost = money(self.db.execute("SELECT price*quantity FROM fills WHERE position_id=? AND side='buy' ORDER BY id LIMIT 1", (p['id'],)).fetchone()[0])
+        cost = usd(min(first_cost * money(r.retest_add_fraction), money(s['liquidity']) * money(r.max_ticket_liquidity_pct) / 100))
+        fee = usd(max(money(r.minimum_fee_usd), cost * money(r.fee_bps) / 10000 + money(r.fixed_fee_usd)))
+        cash = money(self.db.execute('SELECT cash FROM account').fetchone()[0])
+        exposure = sum((money(x['cost']) for x in self.open_positions()), Decimal(0))
+        if cost <= 0 or cash < cost + fee or exposure + cost + fee > money(r.max_exposure) or fee * 2 / cost * 100 > 3:
+            self.log(run_id, sid, now, 'SIZE', 'skip', ['retest_add_not_viable'])
+            return
+        fill_price = price * (1 + money(r.slippage_bps) / 10000)
+        quantity = cost / fill_price
+        self.db.execute('UPDATE positions SET quantity=?, cost=? WHERE id=?',
+                        (str(money(p['quantity']) + quantity), str(money(p['cost']) + cost + fee), p['id']))
+        self.db.execute('UPDATE position_peaks SET added=1 WHERE position_id=?', (p['id'],))
+        self._fill(p['id'], sid, 'buy', now, fill_price, quantity, fee, cash - cost - fee)
+        self.log(run_id, sid, now, 'FILLS', 'buy', ['retest_add_after_50pct'])
 
     def report(self, now=None):
         now = time.time() if now is None else now

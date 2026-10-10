@@ -5,9 +5,13 @@ from dataclasses import asdict,replace
 from .ai import init,audit,state_for
 from .core import encode,vet
 from .post_questions import questions
-from .post_policy import soft_reasons,pick_passed,size
+from .post_policy import soft_reasons,pick_passed,size,fixed_size
 from .filters import save
 from .bench import reject
+
+# The post reads X inside the dossier. Evidence arrives asynchronously from the Grok SOCIAL seat,
+# so a candidate with a published handle waits this long for it before proceeding unvetted.
+SOCIAL_WAIT_SECONDS=1800
 
 
 def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
@@ -15,8 +19,16 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
     init(desk);providers.ready()
     desk.db.execute('CREATE TABLE IF NOT EXISTS post_bench(token TEXT PRIMARY KEY,until REAL NOT NULL,reason TEXT NOT NULL)')
     with desk.db:desk.db.execute('INSERT INTO ai_cycles VALUES (?,?,?,?,NULL,?,NULL,NULL)',(run_id,policy.version,encode(asdict(policy)),time.time(),'running'))
-    shortlist=[];selected=None;state='complete';entry_size=None
+    shortlist=[];selected=None;state='complete';entry_size=None;judge_errors=0
     original_rules=desk.rules
+    liquidity_fraction=desk.rules.max_ticket_liquidity_pct/100
+    def judged(token,stage,state,name):
+        # A failed judge skips this candidate without benching it, as the post specifies.
+        nonlocal judge_errors
+        try:answer=providers.judge(state,questions(name,state))
+        except Exception as error:
+            judge_errors+=1;audit(desk,run_id,token,'judge_failed',dict(stage=stage,error_type=type(error).__name__));return None
+        audit(desk,run_id,token,stage,answer);return answer
     try:
         for snapshot in snapshots:
             token=snapshot['token'];save(desk,run_id,snapshot,time.time(),check_quotes=False)
@@ -38,37 +50,55 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 mint_authority=mint.get('mint_authority'),freeze_authority=mint.get('freeze_authority'),
                 top_wallet_percent=holders.get('top_account_pct'),top_10_percent=holders.get('top10_account_pct'),
                 holder_count=holders.get('owner_count'),developer_holding_percentage=indexed.get('developer_holding_percentage'),
-                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*.06,snapshot['liquidity']*.02),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
+                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*.06,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
             market_state={k:dossier.get(k) for k in ('observations','changes','holder_growth','volume_ratio_6h','change','liquidity_usd','intended_ticket_usd','ticket_basis')}
             market_state['trade_windows']=snapshot.get('trade_windows')
-            market=providers.judge(market_state,questions('market',market_state));audit(desk,run_id,token,'post_market',market)
+            job=snapshot.get('social_job') or {}
+            if indexed.get('x_handle') and not snapshot.get('social_evidence') and type(job.get('requested_at')) in (int,float) and time.time()-job['requested_at']<SOCIAL_WAIT_SECONDS:
+                audit(desk,run_id,token,'post_social_pending',dict(handle=indexed['x_handle'],waited_seconds=int(time.time()-job['requested_at'])));continue
+            market=judged(token,'post_market',market_state,'market')
+            if market is None:continue
             chain_state={k:dossier.get(k) for k in ('mint_authority','freeze_authority','top_wallet_percent','top_10_percent','holder_count','developer_holding_percentage')}
             chain_state['concentration_unit']='percentage_points_0_to_100'
             chain_state['concentration_measure']=dossier['concentration_measure']
-            chain=providers.judge(chain_state,questions('chain_solana',chain_state));audit(desk,run_id,token,'post_chain_solana',chain)
+            chain=judged(token,'post_chain_solana',chain_state,'chain_solana')
+            if chain is None:continue
             social=None
             if snapshot.get('social_evidence'):
                 social_state=dict(snapshot['social_evidence'],token=dict(ticker=snapshot.get('symbol'),narrative=indexed.get('description')),published_handle=indexed.get('x_handle'))
-                social=providers.judge(social_state,questions('social',social_state));audit(desk,run_id,token,'post_social',social)
+                social=judged(token,'post_social',social_state,'social')
+                if social is None:continue
             reasons=soft_reasons(market['answers'],chain['answers'],social['answers'] if social else None)
             if reasons:
                 audit(desk,run_id,token,'post_soft_reject',dict(reasons=reasons))
                 reject(desk,token,reasons)
                 continue
-            shortlist.append(dict(token=token,summary=encode(dict(market=market['answers'],chain=chain['answers'],social=social['answers'] if social else None)),evidence=dossier,snapshot=snapshot,partial=social is None or bool((snapshot.get('world_context') or {}).get('degraded',True))))
-        if shortlist:
+            # The post's 0.6 cut is for "no usable X account". WorldMonitor state is recorded, not multiplied.
+            shortlist.append(dict(token=token,summary=encode(dict(market=market['answers'],chain=chain['answers'],social=social['answers'] if social else None)),evidence=dossier,snapshot=snapshot,partial=social is None,world_degraded=bool((snapshot.get('world_context') or {}).get('degraded',True))))
+        if len(shortlist)==1:
+            # A single survivor skips the pick and its gate, as in the post.
+            selected=shortlist[0]['token'];audit(desk,run_id,selected,'post_pick',dict(reason='single_survivor_skips_pick'))
+        elif shortlist:
             candidates=[dict(token=c['token'],summary=c['summary'],evidence=c['evidence']) for c in shortlist]
-            pick=providers.judge(dict(candidates=candidates),questions('pick',dict(candidates=candidates)))
-            audit(desk,run_id,None,'post_pick',pick)
-            if pick_passed(pick['answers']):selected=pick['answers']['best']['choice']
+            pick=judged(None,'post_pick',dict(candidates=candidates),'pick')
+            if pick and pick_passed(pick['answers']):selected=pick['answers']['best']['choice']
         if selected:
             chosen=next(c for c in shortlist if c['token']==selected);e=chosen['snapshot'].get('sizing_evidence')
-            if not isinstance(e,dict) or not isinstance(e.get('source'),str) or not e['source'] or type(e.get('observed_at')) not in (int,float) or not 0<=time.time()-e['observed_at']<=3600:
-                audit(desk,run_id,selected,'post_size',dict(reason='missing_fresh_explicit_kelly_inputs'));selected=None
-            else:
-                cash=float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])
-                entry_size=size(cash,cash,e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3))
+            cash=float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])
+            explicit=isinstance(e,dict) and isinstance(e.get('source'),str) and e['source'] and type(e.get('observed_at')) in (int,float) and 0<=time.time()-e['observed_at']<=3600
+            if chosen['snapshot'].get('observe_only'):
+                audit(desk,run_id,selected,'post_size',dict(reason='observe_only'));selected=None
+            elif chosen['snapshot'].get('entries_blocked'):
+                audit(desk,run_id,selected,'post_size',dict(reason=chosen['snapshot']['entries_blocked']));selected=None
+            elif explicit:
+                entry_size=size(cash,cash,e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3),liquidity_fraction=liquidity_fraction)
                 audit(desk,run_id,selected,'post_size',entry_size)
+            elif desk.rules.paper_fixed_fraction:
+                entry_size=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction)
+                audit(desk,run_id,selected,'post_size',entry_size)
+            else:
+                audit(desk,run_id,selected,'post_size',dict(reason='missing_fresh_explicit_kelly_inputs'));selected=None
+            if selected:
                 if entry_size['dollars']<=0 or entry_size['dollars']>desk.rules.ticket:
                     audit(desk,run_id,selected,'post_size_block',dict(reason='zero_size_or_exceeds_preflight_ticket'));selected=None
         if selected:
@@ -86,13 +116,14 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 finally:desk.rules=original_rules
     except Exception as error:
         state='blocked';selected=None;audit(desk,run_id,None,'error',dict(error_type=type(error).__name__))
+    if state=='complete' and judge_errors:state='degraded'
     original_rules=desk.rules
     try:
         if selected:desk.rules=replace(desk.rules,ticket=entry_size['dollars'])
         for s in snapshots:
             row=desk.db.execute('SELECT id FROM ai_decisions WHERE run_id=? AND token=? ORDER BY id DESC LIMIT 1',(run_id,s['token'])).fetchone()
             s=dict(s,ai_policy_version=policy.version,ai_decision_id=row[0] if row else None)
-            desk.record(run_id,s,time.time(),enter=state=='complete' and s['token']==selected)
+            desk.record(run_id,s,time.time(),enter=state!='blocked' and s['token']==selected)
     finally:desk.rules=original_rules
     summary=dict(mode='paper_only',state=state,selected_token=selected,shortlisted=len(shortlist),calls=providers.calls,policy_version=policy.version,rules_version=desk.rules.version,ready_for_live=False,paper_buys=desk.db.execute("SELECT COUNT(*) FROM fills f JOIN snapshots s ON s.id=f.snapshot_id WHERE s.run_id=? AND f.side='buy'",(run_id,)).fetchone()[0])
     with desk.db:desk.db.execute('UPDATE ai_cycles SET finished_at=?,state=?,selected_token=?,summary=? WHERE run_id=?',(time.time(),state,selected,encode(summary),run_id))

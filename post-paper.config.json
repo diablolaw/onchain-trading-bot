@@ -2,7 +2,7 @@
   "initial_cash": 10000,
   "ticket": 600,
   "max_positions": 1,
-  "max_exposure": 605,
+  "max_exposure": 905,
   "require_preflight": true,
   "min_age_hours": 0.25,
   "max_age_hours": 72,
@@ -26,5 +26,9 @@
   "fixed_fee_usd": 0,
   "minimum_fee_usd": 0.95,
   "exit_policy": "post_volume",
-  "max_ticket_liquidity_pct": 2
+  "max_ticket_liquidity_pct": 0.5,
+  "paper_fixed_fraction": 0.015,
+  "rug_liquidity_drop_pct": 50,
+  "whale_hold_max_seconds": 1800,
+  "retest_add_fraction": 0.5
 }

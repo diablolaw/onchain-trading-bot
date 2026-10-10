@@ -1,7 +1,7 @@
 """Deterministic screening evidence, explicitly separate from live execution readiness."""
 import time
 
-from .core import money, number, concentration
+from .core import money, number, concentration, concentration_reasons
 from .onchain import TOKEN_PROGRAM, TOKEN_2022_PROGRAM, uint, UnsupportedTokenFeature, MetadataIdentityMismatch
 from .quotes import USDC
 
@@ -89,15 +89,16 @@ def preflight_reasons(token, evidence, rules, now, *, check_quotes=True):
     if top is None or top10 is None or not top <= top10 <= 100:
         reasons.append('invalid_owner_concentration')
     elif top > rules.max_top_owner_pct or top10 > rules.max_top10_owner_pct:
-        reasons.append('owner_concentration')
+        reasons.extend(concentration_reasons(top,top10,rules))
     if check_quotes:reasons.extend(quote_reasons(token, evidence.get('quotes'), rules, now))
     return list(dict.fromkeys(reasons))
 
 
-def collect(token, rules, rpc, jupiter, *, check_quotes=True):
+def collect(token, rules, rpc, jupiter, *, check_quotes=True, pool=None):
     evidence = dict(token=token, mint=None, holders=None, quotes=None, errors=[])
     try:
-        evidence['mint'], evidence['holders'] = rpc.inspect(token)
+        # Only the largest-account inspector uses the pool to label its own vaults.
+        evidence['mint'], evidence['holders'] = rpc.inspect(token, pool=pool) if pool and hasattr(rpc, 'pool_owners') else rpc.inspect(token)
     except MetadataIdentityMismatch as error:
         evidence['errors'].append('metadata_identity_mismatch')
         evidence['onchain_error'] = str(error)
