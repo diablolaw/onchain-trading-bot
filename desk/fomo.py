@@ -87,6 +87,11 @@ class Bridge:
                                 bridge.diagnostics={k:raw.get(k) is True for k in ('matching_origin','authorization_header_seen','bearer_header_seen','cookie_session_seen')}
                                 count=raw.get('requests_seen',0)
                                 bridge.diagnostics['requests_seen']=count if isinstance(count,int) and not isinstance(count,bool) and 0<=count<=1000000 else 0
+                                bridge.diagnostics['cookie_token_found']=raw.get('cookie_token_found') is True
+                                bridge.diagnostics['page_token_seen']=raw.get('page_token_seen') is True
+                                for key in ('session_renewals','token_seconds_left'):
+                                    value=raw.get(key)
+                                    bridge.diagnostics[key]=value if isinstance(value,int) and not isinstance(value,bool) and -10**7<=value<=10**7 else None
                     elif self.path=='/result':
                         with bridge.lock:
                             item=bridge.pending.get(data.get('id'))

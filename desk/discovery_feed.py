@@ -52,7 +52,11 @@ def poll(desk,queries,scanner=None,now=None,gecko=None):
         for item in [*launches,*found.values()]:
             desk.db.execute('INSERT INTO launch_watch(token,created_at) VALUES (?,?) ON CONFLICT(token) DO UPDATE SET created_at=min(created_at,excluded.created_at)',(item['token'],item['created_at']))
         desk.db.execute('DELETE FROM launch_watch WHERE created_at<?',(stamp-desk.rules.max_age_hours*3600,))
-        desk.db.execute('DELETE FROM launch_watch WHERE token IN (SELECT token FROM launch_watch ORDER BY created_at DESC,token LIMIT -1 OFFSET 500)')
+        # Over 500 mints, drop the weakest, not the oldest: keep each new mint until its first
+        # refresh, then rank by last seen 24h volume. Trimming by age alone kept only mints under
+        # about 80 minutes old, when nearly all are still below the liquidity and volume floors.
+        desk.db.execute('''DELETE FROM launch_watch WHERE token IN (SELECT w.token FROM launch_watch w LEFT JOIN launch_feed f ON f.token=w.token
+            ORDER BY w.last_refreshed=0 DESC,COALESCE(json_extract(f.data,'$.volume_24h'),0) DESC,w.created_at DESC,w.token LIMIT -1 OFFSET 500)''')
     # Refresh watched mints even when they disappear from search. Rotate work.
     refresh=[r[0] for r in desk.db.execute('SELECT token FROM launch_watch ORDER BY last_refreshed,token LIMIT 60') if r[0] not in found]
     if refresh:
@@ -75,6 +79,18 @@ def poll(desk,queries,scanner=None,now=None,gecko=None):
         desk.db.execute('INSERT OR REPLACE INTO launch_feed_status VALUES (1,?,?)',(stamp,encode(status)))
     return status
 
+
+def wait_for_first_poll(desk,timeout=90,sleep=time.sleep,clock=time.monotonic,now=time.time):
+    """SCAN and VET start together; give SCAN's first poll time to land before reading the feed.
+
+    A status row left by an earlier run does not count: on a restart it made the first cycle read
+    an empty feed, report a failed fetch and then sleep a whole decision interval."""
+    init(desk);deadline=clock()+timeout
+    while True:
+        row=desk.db.execute('SELECT observed_at FROM launch_feed_status WHERE id=1').fetchone()
+        if row is not None and 0<=now()-row[0]<=65:return True
+        if clock()>=deadline:return False
+        sleep(2)
 
 def candidates(desk,limit=100,excluded=(),now=None):
     init(desk);now=time.time() if now is None else now

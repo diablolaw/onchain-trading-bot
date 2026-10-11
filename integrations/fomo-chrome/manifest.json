@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Trading Desk FOMO Market Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read FOMO market metrics for your local paper scanner. No trading endpoints.",
   "permissions": [
     "webRequest",
+    "cookies",
     "storage",
     "alarms"
   ],
@@ -17,5 +18,17 @@
   "background": {
     "service_worker": "background.js"
   },
-  "options_page": "options.html"
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://fomo.family/*",
+        "https://www.fomo.family/*"
+      ],
+      "js": [
+        "fomo-token.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }

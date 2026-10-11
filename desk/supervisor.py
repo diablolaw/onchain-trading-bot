@@ -12,10 +12,11 @@ def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,
     if decision_interval<60:raise ValueError('decision interval must be >=60')
     root=Path(__file__).resolve().parent.parent
     db=str(Path(db).resolve())
+    config=(root/paper_config).resolve()
     if not observe_only:
-        validate_entry_setup(root,db,sizing_file)
-    common=[sys.executable,'-m','desk','--db',db,'--config',str(root/'post-paper.config.json')]
-    decision=common+['--ai-config',str(root/'post-ai.config.json'),'ai-watch','--discovery-feed','--fomo','--limit','3','--interval',str(decision_interval)]
+        validate_entry_setup(root,db,sizing_file,config)
+    common=[sys.executable,'-m','desk','--db',db,'--config',str(config)]
+    decision=common+['--ai-config',str(root/'post-ai.config.json'),'ai-watch','--discovery-feed','--fomo','--limit','5','--interval',str(decision_interval)]
     if sizing_file:decision+=['--sizing-file',str(Path(sizing_file).resolve())]
     if observe_only:decision+=['--observe-only']
     if worldmonitor_url:decision+=['--worldmonitor-url',worldmonitor_url]
@@ -77,7 +78,7 @@ def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,
             except subprocess.TimeoutExpired:p.kill();p.wait()
 
 
-def validate_entry_setup(root,db,sizing_file):
+def validate_entry_setup(root,db,sizing_file,config=None):
     """Reject impossible entry configuration before starting a billed worker."""
     import sqlite3
     from .core import Rules

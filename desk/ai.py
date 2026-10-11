@@ -66,7 +66,10 @@ def validate_jev(reply, questions):
             values=[probability(dist[str(i)]) for i in range(len(levels))]
             weighted=sum(i*v for i,v in enumerate(values))
             result=answer.get('score')
-            if type(result) not in (int,float) or not math.isfinite(result) or abs(sum(values)-1)>.001 or abs(result-weighted)>.01:raise ValueError('invalid Jev weighted score')
+            # Jev reports two decimals, so each level may be off by .005: allow that rounding and no more.
+            # A .001 sum check discarded a valid answer whose levels summed to .99.
+            slack=.005*len(levels)+1e-9
+            if type(result) not in (int,float) or not math.isfinite(result) or abs(sum(values)-1)>slack or abs(result-weighted)>.005*sum(range(len(levels)))+.005+1e-9:raise ValueError('invalid Jev weighted score')
             probability(answer.get('confidence'))
         elif question['type']=='choice':
             options = question['criteria']
@@ -184,13 +187,28 @@ def audit(desk, run_id, token, stage, data):
                                (run_id,token,stage,time.time(),encode(data))).lastrowid
 
 
+def spread(history, now, count=3, window=3600):
+    """Up to count earlier observations spaced across the window, oldest first.
+
+    The feed ticks every 30 seconds, so the newest three covered about 80 seconds, were often
+    identical, and crowded out the previous cycle's reading."""
+    recent=[s for s in history if 0<now-s['observed_at']<=window]
+    if len(recent)<=count:return history[-count:]
+    start=recent[0]['observed_at'];chosen=[]
+    for i in range(count):
+        target=start+(now-start)*i/count
+        best=min(recent,key=lambda s:abs(s['observed_at']-target))
+        if best not in chosen:chosen.append(best)
+    return chosen
+
+
 def state_for(desk, snapshot):
     rows = desk.db.execute('SELECT data FROM snapshots WHERE token=? AND pair=? AND observed_at<? ORDER BY observed_at DESC LIMIT 3',
                           (snapshot['token'],snapshot['pair'],snapshot['observed_at'])).fetchall()
     if desk.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='launch_observations'").fetchone():
-        feed=desk.db.execute('SELECT data FROM launch_observations WHERE token=? AND pair=? AND observed_at<? AND observed_at>=? ORDER BY observed_at DESC LIMIT 3',(snapshot['token'],snapshot['pair'],snapshot['observed_at'],snapshot['observed_at']-3600)).fetchall()
+        feed=desk.db.execute('SELECT data FROM launch_observations WHERE token=? AND pair=? AND observed_at<? AND observed_at>=? ORDER BY observed_at',(snapshot['token'],snapshot['pair'],snapshot['observed_at'],snapshot['observed_at']-3600)).fetchall()
         by_time={json.loads(row[0])['observed_at']:json.loads(row[0]) for row in [*rows,*feed]}
-        history=sorted(by_time.values(),key=lambda s:s['observed_at'])[-3:]+[snapshot]
+        history=spread(sorted(by_time.values(),key=lambda s:s['observed_at']),snapshot['observed_at'])+[snapshot]
     else:
         history = [json.loads(row[0]) for row in reversed(rows)]+[snapshot]
     observations = [{key:s.get(key) for key in ('observed_at','price','liquidity','volume_6h','volume_24h','buys_1h','sells_1h')} for s in history

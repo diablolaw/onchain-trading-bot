@@ -19,6 +19,11 @@ from .quotes import Jupiter
 from .scanner import DexScreener, best_pair
 
 
+def market_fields(fresh):
+    """A re-fetched pair observation, without the empty holder fields that would erase the dossier's evidence."""
+    return {k:v for k,v in fresh.items() if k not in ('holders','concentration_measure')}
+
+
 def add_commands(parser, sub):
     parser.add_argument('--ai-config',help='JSON AI policy overrides')
     sub.add_parser('fomo-setup',help='Print local extension pairing key; not a FOMO credential')
@@ -164,7 +169,8 @@ def run(args,desk):
             gecko=GeckoTerminal(recorder)
             if getattr(args,'discovery_feed',False):
                 if getattr(args,'compare_discovery',False):raise ValueError('choose --discovery-feed or --compare-discovery')
-                from .discovery_feed import candidates as feed_candidates
+                from .discovery_feed import candidates as feed_candidates,wait_for_first_poll
+                wait_for_first_poll(desk)
                 candidates,discovery=feed_candidates(desk,args.market_limit,open_tokens)
                 streams={c['token']:{'dexscreener_search'} for c in candidates}
                 if discovery['fetch_failed']:discovery_error='discovery_feed_degraded'
@@ -218,7 +224,7 @@ def run(args,desk):
                 discovery['fomo']=dict(status='partial' if batch_errors and fomo_metrics else 'unavailable' if batch_errors else 'complete',returned_tokens=len(fomo_metrics),batch_errors=batch_errors)
                 if batch_errors:
                     discovery_error='fomo_batch_failure'
-                    recorder('fomo:error',discovery['fomo'],time.time())
+                    recorder('fomo:error',dict(discovery['fomo'],bridge=bridge.status()),time.time())
             if policy.judgment_profile=='post' and bridge:
                 surviving=[];free_rejections=[]
                 for candidate in candidates:
@@ -251,8 +257,11 @@ def run(args,desk):
                 return -((candidate.get('volume_24h') or 0)/max(candidate.get('market_cap') or 0,1))
             candidates.sort(key=turnover)
             if policy.judgment_profile=='post':
-                from .comparison import rank_before_dossiers
+                from .comparison import rank_before_dossiers,first_looks_first
                 candidates=rank_before_dossiers(desk,candidates,fomo_metrics,markets or {})
+                # Most dossier slots go to tokens never checked before; the rest follow the ranking,
+                # so a token waiting on Grok evidence still gets its second look.
+                candidates=first_looks_first(desk,candidates,(min(args.limit,policy.max_candidates)+1)//2)
             rpc=(PostSolanaRPC(recorder,http=JsonHTTP(spacing=6.1,attempts=2),allow_mutable_metadata=policy.judgment_profile=='post') if desk.rules.concentration_measure=='token_accounts' else SolanaRPC(recorder,allow_transfer_fees=True))
             jupiter=Jupiter(recorder)
             dossiers=0
@@ -264,6 +273,9 @@ def run(args,desk):
                         recorder('ai:collection_error',dict(token=token,reason='no_dexscreener_base_pair'),time.time())
                         save_filters(desk,run_id,dict(token=token,collection_error='no_dexscreener_base_pair'),time.time())
                         continue
+                    if markets is not None and time.time()-snapshot['observed_at']>desk.rules.max_snapshot_age/2:
+                        # Earlier dossiers can take minutes; re-fetch this pair rather than vet an aging batch read.
+                        snapshot=scanner.pair(snapshot['pair'],token)
                     if bridge:
                         if token not in fomo_metrics:
                             snapshot['early_rejection_reasons']=['fomo_evidence_unavailable']
@@ -337,6 +349,12 @@ def run(args,desk):
                 # Early batches can age out while remaining batches/RPCs complete.
                 # Re-fetch real data, never advance a saved observation timestamp.
                 refresh_tokens=[s['token'] for s in snapshots if not s.get('early_rejection_reasons')]
+                for snapshot in snapshots:
+                    if snapshot['token'] not in refresh_tokens:continue
+                    try:snapshot.update(market_fields(scanner.pair(snapshot['pair'],snapshot['token'])))
+                    except Exception as error:
+                        # The old observation stays and ages out under the normal freshness rule.
+                        recorder('ai:market_refresh_error',dict(token=snapshot['token'],error_type=type(error).__name__),time.time())
                 refreshed,refresh_errors=collect_batches(bridge,refresh_tokens)
                 recorder('fomo:pre_ai_refresh',dict(metrics=refreshed,errors=refresh_errors),time.time())
                 for snapshot in snapshots:

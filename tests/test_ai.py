@@ -230,3 +230,23 @@ class PaperAITests(unittest.TestCase):
         _,result = self.cycle()
         self.assertFalse(self.providers.judge.called)
         self.assertEqual(result['paper_buys'],0)
+
+
+class ObservationHistoryTests(unittest.TestCase):
+    def test_judge_history_spans_the_hour_not_the_last_three_feed_ticks(self):
+        from desk.ai import state_for
+        from desk.core import encode
+        from desk.discovery_feed import init as init_feed
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules())
+            try:
+                init_feed(desk)
+                current = sample(now=NOW)
+                with desk.db:
+                    for age in range(100, 3001, 100):
+                        s = sample(price=1 + age / 3000, now=NOW - age)
+                        desk.db.execute('INSERT INTO launch_observations VALUES (?,?,?,?)', (s['token'], s['pair'], s['observed_at'], encode(s)))
+                seen = [NOW - o['observed_at'] for o in state_for(desk, current)['observations']]
+                self.assertEqual(seen, [3000, 2000, 1000, 0])
+            finally:
+                desk.close()

@@ -23,6 +23,17 @@ class PostPolicyTests(unittest.TestCase):
         reply['answers']['effort']['score']=1
         with self.assertRaises(ValueError):validate_jev(reply,qs)
 
+    def test_score_accepts_two_decimal_rounding_seen_in_the_paper_run(self):
+        levels=['Only an isolated image or post','Several promotional posts','Regular substantive work beyond price','Visible team delivering identifiable work']
+        qs={'effort':{'type':'score','criteria':levels}}
+        answer={'type':'score','score':1.34,'legend':{str(i):l for i,l in enumerate(levels)},'probabilities':{'0':0.0,'1':.68,'2':.28,'3':.03},'confidence':.66}
+        reply={'model':'test','answers':{'effort':answer},'usage':{'input_tokens':1,'output_tokens':1}}
+        self.assertEqual(validate_jev(reply,qs)['effort']['score'],1.34)
+        answer['probabilities']={'0':0.0,'1':.68,'2':.28,'3':0.0}
+        with self.assertRaises(ValueError):validate_jev(reply,qs)
+        answer['probabilities']={'0':0.0,'1':.68,'2':.28,'3':.03};answer['score']=1.5
+        with self.assertRaises(ValueError):validate_jev(reply,qs)
+
     def test_runner_holds_past_profit_and_time_until_volume_fades(self):
         import tempfile
         from pathlib import Path

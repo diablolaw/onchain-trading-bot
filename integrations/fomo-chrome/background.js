@@ -22,6 +22,60 @@ chrome.webRequest.onBeforeSendHeaders.addListener(details => {
   }
 }, {urls: ['https://prod-api.fomo.family/*']}, ['requestHeaders', 'extraHeaders']);
 
+// FOMO's own session token, read from its cookie so requests can carry it alone.
+// Sending only this header avoids attaching every fomo.family cookie, which caused HTTP 431.
+async function cookieBearer() {
+  // getAll by domain also finds the cookie when it is set on a subdomain or .fomo.family.
+  const cookies = await chrome.cookies.getAll({domain: 'fomo.family', name: 'privy-token'}).catch(() => []);
+  diagnostics.cookie_token_found = cookies.some(c => /^[A-Za-z0-9._-]{20,4096}$/.test(c.value || ''));
+  const cookie = cookies.find(c => /^[A-Za-z0-9._-]{20,4096}$/.test(c.value || ''));
+  return cookie ? 'Bearer ' + cookie.value : null;
+}
+// FOMO's login token is short-lived and only renewed while a FOMO page loads or runs.
+// When it has lapsed, reload the FOMO tab (or open one in the background) instead of asking the user to.
+const FOMO_TABS = ['https://fomo.family/*', 'https://www.fomo.family/*'];
+async function renewFomoSession() {
+  const {lastRenewal = 0} = await chrome.storage.session.get('lastRenewal');
+  if (Date.now() - lastRenewal < 5 * 60 * 1000) return;
+  await chrome.storage.session.set({lastRenewal: Date.now()});
+  diagnostics.session_renewals = (diagnostics.session_renewals || 0) + 1;
+  const tabs = await chrome.tabs.query({url: FOMO_TABS}).catch(() => []);
+  if (tabs.length) await chrome.tabs.reload(tabs[0].id).catch(() => null);
+  else await chrome.tabs.create({url: 'https://fomo.family/', active: false}).catch(() => null);
+}
+// Seconds until a JWT bearer expires, or null when it carries no readable expiry.
+function secondsLeft(bearer) {
+  try {
+    const part = bearer.split(' ')[1].split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const exp = JSON.parse(atob(part.padEnd(part.length + (4 - part.length % 4) % 4, '='))).exp;
+    return typeof exp === 'number' ? exp - Date.now() / 1000 : null;
+  } catch (_) { return null; }
+}
+async function filterTokens(tokens, bearer) {
+  return fetch('https://prod-api.fomo.family/proxy/filterTokens', {
+    // A bearer request omits cookies; only the cookie fallback lets Chrome attach them.
+    method: 'POST', credentials: bearer ? 'omit' : 'include',
+    headers: {'Content-Type': 'application/json', ...(bearer ? {'Authorization': bearer} : {})},
+    body: JSON.stringify(tokens.map(t => t + ':1399811149')),
+    redirect: 'error', signal: AbortSignal.timeout(20000)
+  });
+}
+
+// The FOMO page reports its live login token (see fomo-token.js). This is the primary session source:
+// it stays current while the page is open, whether or not the page itself calls the API.
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (!['https://fomo.family', 'https://www.fomo.family'].includes(sender.origin)) return;
+  if (message?.type !== 'fomo-page-token' || typeof message.token !== 'string') return;
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(message.token) || message.token.length > 4096) return;
+  const bearer = 'Bearer ' + message.token;
+  const left = secondsLeft(bearer);
+  if (left === null || left <= 0) return;
+  authorization = bearer;
+  diagnostics.page_token_seen = true;
+  chrome.storage.session.set({fomoAuthorization: authorization, fomoDiagnostics: diagnostics});
+  poll();
+});
+
 async function local(path, key, data) {
   const response = await fetch('http://127.0.0.1:8766' + path, {
     method: data === undefined ? 'GET' : 'POST',
@@ -77,14 +131,21 @@ async function poll() {
       const session = await chrome.storage.session.get('fomoAuthorization');
       authorization = session.fomoAuthorization || null;
     }
+    // Renew ahead of expiry so a desk cycle never lands on a lapsed token.
+    const left = authorization ? secondsLeft(authorization) : null;
+    diagnostics.token_seconds_left = left === null ? null : Math.round(left);
+    if (!authorization) await cookieBearer();
+    if (left !== null && left < 600) await renewFomoSession();
     const {bridgeKey} = await chrome.storage.local.get('bridgeKey');
     if (!/^[a-f0-9]{64}$/.test(bridgeKey || '')) return;
-    await local('/heartbeat', bridgeKey, {session_ready: !!authorization || cookieSessionObserved, diagnostics});
+    await local('/heartbeat', bridgeKey, {session_ready: !!authorization || cookieSessionObserved || !!(await cookieBearer()), diagnostics});
     const {jobs} = await local('/jobs', bridgeKey);
     for (const job of jobs) {
       let result = {id: job.id};
       try {
-        if (!authorization && !cookieSessionObserved) throw new Error('session_not_observed_reload_fomo');
+        const fromCookie = authorization ? null : await cookieBearer();
+        if (!authorization && !fromCookie) await renewFomoSession();
+        if (!authorization && !fromCookie && !cookieSessionObserved) throw new Error('session_not_observed_reload_fomo');
         if (!Array.isArray(job.tokens) || job.tokens.length > 20 || job.tokens.some(t => !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t))) throw new Error('invalid_job');
         const response = await fetch('https://prod-api.fomo.family/proxy/filterTokens', {
           // Bearer sessions do not need the additional browser Cookie header.

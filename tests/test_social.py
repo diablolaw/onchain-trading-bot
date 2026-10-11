@@ -16,6 +16,11 @@ class SocialTests(unittest.TestCase):
                 data=dict(token=TOKEN,handle='project',observed_at=time.time(),source='grok_bot_x_plugin',x_account={'handle':'project','recent_posts':[]})
                 submit(desk.db,data)
                 self.assertIsNotNone(request(desk,TOKEN,'project'))
+                # Fresh evidence is not queued again; evidence past half its hour is.
+                self.assertEqual(jobs(desk.db),[])
+                desk.db.execute('UPDATE social_evidence SET observed_at=?',(time.time()-2000,))
+                self.assertIsNotNone(request(desk,TOKEN,'project'))
+                self.assertEqual(jobs(desk.db)[0]['handle'],'project')
                 with self.assertRaises(ValueError):submit(desk.db,dict(data,handle='imposter'))
                 with self.assertRaises(ValueError):submit(desk.db,dict(data,observed_at=time.time()-4000))
             finally:desk.db.close()

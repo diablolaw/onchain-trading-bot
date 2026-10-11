@@ -11,6 +11,10 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS discovery_comparison(
  observed_at REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(run_id,token));'''
 
 
+# Between two cycles a price move this small with unchanged holders is noise, not one buyer lifting the price.
+HOLDERS_FLAT_MIN_PRICE_PCT = 5
+
+
 def search(scanner, queries):
     if not 1 <= len(queries) <= 5 or any(not q.strip() or len(q)>80 for q in queries):
         raise ValueError('provide 1..5 search queries, each 1..80 characters')
@@ -71,7 +75,7 @@ def rank(desk, run_id, snapshots, *, check_quotes=True):
             pb,ps=number(previous.get('buys_1h')),number(previous.get('sells_1h'))
             if sells>buys and pb is not None and ps is not None and ps>pb:
                 scan_reasons.append('scan_sells_dominate_two_observations')
-        if growth is not None and price_growth is not None and price_growth>0 and growth<=0:
+        if growth is not None and price_growth is not None and price_growth>HOLDERS_FLAT_MIN_PRICE_PCT and growth<=0:
             scan_reasons.append('scan_holders_flat_while_price_rises')
         reasons.extend(scan_reasons)
         s['scan_rejection_reasons']=scan_reasons
@@ -165,3 +169,14 @@ def rank_before_dossiers(desk,candidates,metrics,markets):
             with desk.db:desk.db.execute('INSERT INTO venue_rank_history VALUES (?,?,?) ON CONFLICT(token) DO UPDATE SET observed_at=excluded.observed_at,data=excluded.data WHERE excluded.observed_at>observed_at',(token,stamp,encode(current)))
     ranked.sort(key=lambda item:(*[-float(v) for v in item[0]],item[1]['token']))
     return [candidate for _,candidate in ranked]
+
+
+def first_looks_first(desk,candidates,reserved):
+    """Move up to `reserved` never-dossiered candidates to the front, youngest pool first.
+
+    Holder-history ranking puts a first-time passer last because it has no history yet. In the $100
+    paper run 25 tokens passed the free cut under an hour old and one reached the judge."""
+    known={r[0] for r in desk.db.execute('SELECT DISTINCT token FROM preflights')}
+    fresh=sorted((c for c in candidates if c['token'] not in known),key=lambda c:(-(number(c.get('created_at')) or 0),c['token']))[:max(0,reserved)]
+    front={c['token'] for c in fresh}
+    return fresh+[c for c in candidates if c['token'] not in front]
