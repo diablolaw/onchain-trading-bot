@@ -40,6 +40,56 @@ class VaultExclusion(unittest.TestCase):
         self.assertEqual(result['top_account_pct'], 13)
         self.assertEqual(result['exclusions'], [])
 
+    def test_provider_that_refuses_batch_lookups_falls_back_to_single_accounts(self):
+        from desk.onchain import PostSolanaRPC
+        pool = key(50)
+        rows = owner_rows([pool] + [key(60 + i) for i in range(12)])['value']
+        rpc = PostSolanaRPC(lambda *a: None, url='https://rpc.invalid')
+        calls = []
+        def call(method, params):
+            calls.append(method)
+            if method == 'getMultipleAccounts':
+                raise RuntimeError('provider HTTP 413')
+            return dict(value=rows[len(calls) - 2]), NOW
+        rpc.call = call
+        accounts = [key(1 + i) for i in range(13)]
+        result = rpc.accounts(accounts, lambda got: sum(1 for r in got if r['data']['parsed']['info']['owner'] != pool) >= 10)
+        self.assertEqual(calls, ['getMultipleAccounts'] + ['getAccountInfo'] * 11)
+        self.assertEqual(result['value'][11:], [None, None])
+        self.assertFalse(rpc.batch_accounts)
+        calls.clear()
+        rpc.accounts(accounts[:2])
+        self.assertEqual(calls, ['getAccountInfo'] * 2)
+
+    def test_market_text_lists_tokens_with_their_outcome(self):
+        from desk.reporting import market_text
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules())
+            from desk.ai import init
+            init(desk)
+            try:
+                run_id = desk.run('ai-paper', NOW)
+                from desk.ai import audit
+                with desk.db:
+                    desk.db.execute("INSERT INTO ai_cycles VALUES (?,'v','{}',1,NULL,'running',NULL,NULL)", (run_id,))
+                audit(desk, run_id, TOKEN, 'deterministic_reject', dict(reasons=['scan_sells_dominate_two_windows']))
+                result = dict(discovery=dict(retained_tokens=235, fomo=dict(status='complete', returned_tokens=97, batch_errors=[])))
+                text = market_text(desk, result, run_id, [dict(token=TOKEN, symbol='PQC', market_cap=210000, liquidity=43000, volume_24h=1400000)])
+                self.assertIn('FOMO complete (97 tokens); feed 235 watched', text)
+                self.assertIn('PQC mcap $210.0k, liq $43.0k, vol24 $1.4M -> deterministic_reject: scan_sells_dominate_two_windows', text)
+            finally:
+                desk.close()
+
+
+class MarketRefresh(unittest.TestCase):
+    def test_refreshed_pair_keeps_dossier_holder_evidence(self):
+        from desk.ai_cli import market_fields
+        snapshot = dict(token=TOKEN, observed_at=1, price=1, holders=dict(top_account_pct=2.4), preflight=dict(ok=True))
+        snapshot.update(market_fields(dict(token=TOKEN, observed_at=500, price=2, holders=None, concentration_measure='token_accounts')))
+        self.assertEqual((snapshot['observed_at'], snapshot['price']), (500, 2))
+        self.assertEqual(snapshot['holders'], dict(top_account_pct=2.4))
+        self.assertEqual(snapshot['preflight'], dict(ok=True))
+
 
 class Sizing(unittest.TestCase):
     def test_liquidity_fraction_caps_ticket(self):
@@ -60,6 +110,8 @@ class Bench(unittest.TestCase):
         self.assertEqual(minutes(['owner_concentration', 'top10_concentration']), 90)
         self.assertEqual(minutes(['invalid_owner_concentration', 'onchain_evidence_unavailable']), 45)
         self.assertEqual(minutes(['liquidity', 'volume']), 25)
+        self.assertEqual(minutes(['liquidity_fits_ticket']), 25)
+        self.assertEqual(minutes(['shape', 'shape_weak', 'momentum_already_spent']), 120)
         self.assertEqual(minutes(['pair_age_out_of_range']), 20)
         self.assertEqual(minutes(['effort']), 45)
 
@@ -163,6 +215,7 @@ class Reporting(unittest.TestCase):
                 result = dict(state='complete', discovery=dict(free_cut=dict(observed=9, passed=1)), shortlisted=0, calls=2)
                 self.assertEqual(after_cycle(desk, result, telegram, now=NOW), 'sent')
                 self.assertIn('9 seen', telegram.send.call_args.args[0])
+                self.assertIn('Market data: FOMO not used', telegram.send.call_args.args[0])
                 with desk.db:
                     desk.db.execute("UPDATE account SET cash='1200'")
                 after_cycle(desk, result, telegram, now=NOW + 86400)
@@ -195,6 +248,82 @@ class SocialDefer(unittest.TestCase):
                     desk.close()
 
     @patch('desk.post_evaluate.time.time', return_value=NOW)
+    def test_unanswered_handle_does_not_restart_its_wait_when_the_job_is_requeued(self, clock):
+        from desk.ai import AIPolicy, audit, init
+        from desk.post_evaluate import evaluate
+        from test_preflight import evidence
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules(require_preflight=True, max_top10_owner_pct=60, exit_policy='post_volume'))
+            try:
+                e = evidence()
+                # The hourly requeue has just reset the job clock, but this handle was first pending 65 minutes ago.
+                s = sample(token=TOKEN, holders=e['holders'], preflight=e, observe_only=True,
+                           indexed_dossier=dict(x_handle='project'), social_job=dict(requested_at=NOW - 20))
+                first = desk.run('history', NOW - 30)
+                desk.record(first, dict(s, observed_at=NOW - 30), NOW - 30, enter=False)
+                init(desk)
+                with desk.db:
+                    desk.db.execute('INSERT INTO ai_cycles VALUES (?,?,?,?,NULL,?,NULL,NULL)', (first, 'v', '{}', NOW - 3000, 'complete'))
+                    desk.db.execute('INSERT INTO ai_decisions(run_id,token,stage,at,data) VALUES (?,?,?,?,?)',
+                                    (first, TOKEN, 'post_social_pending', NOW - 3000, '{"handle":"project","waited_seconds":900}'))
+                provider = Providers()
+                run = desk.run('post', NOW)
+                evaluate(desk, run, [s], provider, AIPolicy(judgment_profile='post', max_calls=10))
+                self.assertEqual(provider.calls, 2)
+                self.assertIsNone(desk.db.execute("SELECT 1 FROM ai_decisions WHERE run_id=? AND stage='post_social_pending'", (run,)).fetchone())
+            finally:
+                desk.close()
+
+    @patch('desk.post_evaluate.time.time', return_value=NOW)
+    def test_small_bank_skips_the_judge_when_the_cut_ticket_cannot_clear_fees(self, clock):
+        from desk.ai import AIPolicy
+        from desk.post_evaluate import evaluate
+        from test_preflight import evidence
+        rules = Rules(initial_cash=100, ticket=40, max_positions=1, max_exposure=42, require_preflight=True, max_top10_owner_pct=60,
+                      exit_policy='post_volume', paper_fixed_fraction=.4, max_bank_fraction=.4, max_roundtrip_fee_pct=5, max_ticket_liquidity_pct=.5)
+        for social, calls in ((None, 0), (dict(x_account=dict(handle='project')), 3)):
+            with self.subTest(social=social), tempfile.TemporaryDirectory() as d:
+                desk = Desk(Path(d) / 'paper.sqlite', rules)
+                try:
+                    e = evidence()
+                    s = sample(token=TOKEN, holders=e['holders'], preflight=e, social_evidence=social)
+                    first = desk.run('history', NOW - 30)
+                    desk.record(first, dict(s, observed_at=NOW - 30), NOW - 30, enter=False)
+                    provider = Providers()
+                    run = desk.run('post', NOW)
+                    evaluate(desk, run, [s], provider, AIPolicy(judgment_profile='post', max_calls=10))
+                    self.assertEqual(provider.calls, calls)
+                    blocked = desk.db.execute("SELECT data FROM ai_decisions WHERE run_id=? AND stage='post_size_block'", (run,)).fetchone()
+                    self.assertEqual(blocked is not None, social is None)
+                finally:
+                    desk.close()
+
+    def test_holders_flat_needs_a_real_price_move(self):
+        from desk.comparison import rank
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules())
+            try:
+                for price_growth, blocked in ((.5, False), (9.0, True)):
+                    s = sample(now=NOW, early_rejection_reasons=['x'], pre_dossier_ranking=dict(holder_growth_pct=0.0, price_growth_pct=price_growth))
+                    rank(desk, desk.run('rank', NOW), [s], check_quotes=False)
+                    self.assertEqual('scan_holders_flat_while_price_rises' in s['scan_rejection_reasons'], blocked)
+            finally:
+                desk.close()
+
+    def test_first_time_passers_take_reserved_dossier_slots_youngest_first(self):
+        from desk.comparison import first_looks_first
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules())
+            try:
+                seen = dict(token=key(1), created_at=NOW - 90000)
+                ranked = [seen] + [dict(token=key(i), created_at=NOW - age) for i, age in ((2, 7200), (3, 600), (4, 1800))]
+                run = desk.run('history', NOW)
+                desk.preflight(run, dict(token=key(1), observed_at=NOW, screen_passed=True, reasons=[]))
+                self.assertEqual([c['token'] for c in first_looks_first(desk, ranked, 2)], [key(3), key(4), key(1), key(2)])
+            finally:
+                desk.close()
+
+    @patch('desk.post_evaluate.time.time', return_value=NOW)
     def test_judge_failure_skips_candidate_without_benching(self, clock):
         from desk.ai import AIPolicy
         from desk.post_evaluate import evaluate
@@ -217,3 +346,21 @@ class SocialDefer(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SmallBankProfile(unittest.TestCase):
+    def test_hundred_dollar_profile_sizes_full_evidence_and_blocks_fee_heavy_partials(self):
+        import json
+        from desk.supervisor import validate_entry_setup
+        root = Path(__file__).resolve().parents[1]
+        config = root / 'post-paper-100.config.json'
+        r = Rules(**json.loads(config.read_text()))
+        self.assertEqual(r.initial_cash, 100)
+        full = fixed_size(100, 100, r.paper_fixed_fraction, 100000, liquidity_fraction=r.max_ticket_liquidity_pct / 100,
+                          max_fee_pct=r.max_roundtrip_fee_pct, max_fraction=r.max_bank_fraction)
+        self.assertEqual(full['dollars'], 40)
+        partial = fixed_size(100, 100, r.paper_fixed_fraction, 100000, partial=True, liquidity_fraction=r.max_ticket_liquidity_pct / 100,
+                             max_fee_pct=r.max_roundtrip_fee_pct, max_fraction=r.max_bank_fraction)
+        self.assertEqual(partial['dollars'], 0)
+        with tempfile.TemporaryDirectory() as d:
+            validate_entry_setup(root, str(Path(d) / 'small.sqlite'), None, config)

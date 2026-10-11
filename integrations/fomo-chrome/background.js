@@ -147,24 +147,19 @@ async function poll() {
         if (!authorization && !fromCookie) await renewFomoSession();
         if (!authorization && !fromCookie && !cookieSessionObserved) throw new Error('session_not_observed_reload_fomo');
         if (!Array.isArray(job.tokens) || job.tokens.length > 20 || job.tokens.some(t => !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(t))) throw new Error('invalid_job');
-        const response = await fetch('https://prod-api.fomo.family/proxy/filterTokens', {
-          // Bearer sessions do not need the additional browser Cookie header.
-          // Cookie-only sessions retain Chrome-managed cookies; never copy them.
-          method: 'POST', credentials: authorization ? 'omit' : 'include',
-          headers: {'Content-Type': 'application/json', ...(authorization ? {'Authorization': authorization} : {})},
-          body: JSON.stringify(job.tokens.map(t => t + ':1399811149')),
-          redirect: 'error', signal: AbortSignal.timeout(20000)
-        });
-        if (response.status === 401 || response.status === 403) {authorization = null; cookieSessionObserved = false; await chrome.storage.session.remove(['fomoAuthorization','cookieSessionObserved']); throw new Error('session_expired_reload_fomo');}
-        // 431: the request's headers (in cookie-only mode, Chrome's fomo.family cookies) are too large.
-        // Reloading FOMO captures a bearer session, which omits cookies on these requests.
-        if (response.status === 431) throw new Error(authorization ? 'fomo_http_431' : 'fomo_headers_too_large_reload_fomo');
+        let response = await filterTokens(job.tokens, authorization || fromCookie);
+        // If the API will not take the cookie token as a bearer, fall back to Chrome's cookies.
+        if (fromCookie && (response.status === 401 || response.status === 403)) response = await filterTokens(job.tokens, null);
+        if (response.status === 401 || response.status === 403) {authorization = null; cookieSessionObserved = false; await chrome.storage.session.remove(['fomoAuthorization','cookieSessionObserved']); await renewFomoSession(); throw new Error('session_expired_reload_fomo');}
+        // 431: request headers too large. Only the cookie fallback sends the full cookie jar.
+        // 'cookie_token_missing' means the extension could not read FOMO's login token (reload the extension, then FOMO).
+        if (response.status === 431) throw new Error(authorization || fromCookie ? 'fomo_http_431' : 'fomo_headers_too_large_cookie_token_missing');
         if (!response.ok) throw new Error('fomo_http_' + response.status);
         const raw = await response.text();
         if (raw.length > 262144) throw new Error('response_too_large');
         result.rows = rowsFrom(JSON.parse(raw), job.tokens);
       } catch (e) {
-        const allowed = ['session_not_observed_reload_fomo','session_expired_reload_fomo','fomo_headers_too_large_reload_fomo','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','fomo_api_rejected'];
+        const allowed = ['session_not_observed_reload_fomo','session_expired_reload_fomo','fomo_headers_too_large_reload_fomo','fomo_headers_too_large_cookie_token_missing','invalid_job','unsupported_response_shape','response_identity_mismatch','response_too_large','fomo_api_rejected'];
         if (e.structure) result.structure = e.structure;
         result.error = allowed.includes(e.message) || /^fomo_http_\d{3}$/.test(e.message) ? e.message : 'market_request_failed';
       }

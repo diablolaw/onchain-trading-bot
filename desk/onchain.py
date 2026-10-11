@@ -228,6 +228,7 @@ POOL_AUTHORITIES = {
 class PostSolanaRPC(SolanaRPC):
     """Guide's largest-token-account concentration, with identified pool vaults labelled and excluded."""
     pool_owners = POOL_AUTHORITIES
+    batch_accounts = True
 
     def call(self, method, params):
         if method not in ('getTokenLargestAccounts','getTokenSupply','getMultipleAccounts'):
@@ -251,15 +252,38 @@ class PostSolanaRPC(SolanaRPC):
         largest,stamp=self.call('getTokenLargestAccounts',[token,{'commitment':'confirmed'}])
         holders=largest_account_evidence(token,mint,largest,stamp)
         if pool:
-            accounts=[row['account'] for row in holders['top_accounts'][:20]]
-            owners,_=self.call('getMultipleAccounts',[accounts,{'encoding':'jsonParsed','commitment':'confirmed'}])
-            holders=exclude_pool_vaults(holders,mint,owners,address(pool),self.pool_owners)
+            pool=address(pool);accounts=[row['account'] for row in holders['top_accounts'][:20]]
+            def enough(rows):
+                # Concentration only reads the top 10 non-vault accounts; owners past that change nothing.
+                return sum(1 for row in rows if account_owner(row) not in (pool,*self.pool_owners))>=10
+            owners=self.accounts(accounts,enough)
+            holders=exclude_pool_vaults(holders,mint,owners,pool,self.pool_owners)
         return mint,holders
+
+    def accounts(self,accounts,enough=None):
+        """getMultipleAccounts, or one getAccountInfo per account when the provider refuses the batch."""
+        if self.batch_accounts:
+            try:
+                result,_=self.call('getMultipleAccounts',[accounts,{'encoding':'jsonParsed','commitment':'confirmed'}])
+                return result
+            except RuntimeError as error:
+                if str(error)!='provider HTTP 413':raise
+                self.batch_accounts=False  # Some plans (seen on QuickNode) return 413 for this method.
+        rows=[]
+        for account in accounts:
+            if enough and enough(rows):break
+            result,_=self.call('getAccountInfo',[account,{'encoding':'jsonParsed','commitment':'confirmed'}])
+            rows.append(result.get('value') if isinstance(result,dict) else None)
+        return dict(value=rows+[None]*(len(accounts)-len(rows)))
 
     def owners(self,token,accounts):
         """Owner of each token account, for RISK's whale-distribution check."""
-        result,_=self.call('getMultipleAccounts',[accounts,{'encoding':'jsonParsed','commitment':'confirmed'}])
-        return token_account_owners(token,accounts,result)
+        return token_account_owners(token,accounts,self.accounts(accounts))
+
+
+def account_owner(row):
+    try:return row['data']['parsed']['info']['owner']
+    except (KeyError,TypeError):return None
 
 
 def token_account_owners(token,accounts,result):

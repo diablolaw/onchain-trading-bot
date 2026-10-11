@@ -41,7 +41,11 @@ def serve(port=8080,db_path="data/post-paper.sqlite",social_only=False):
             if self.path!='/social/jobs':return self.reply(404,dict(error='not_found'))
             import sqlite3
             from .social import jobs
-            with sqlite3.connect(db_path,timeout=5) as db:return self.reply(200,dict(jobs=jobs(db)))
+            # A busy database must answer, not drop the connection: the tunnel reports a dropped one as the service being down.
+            try:
+                with sqlite3.connect(db_path,timeout=5) as db:found=jobs(db)
+            except sqlite3.Error:return self.reply(503,dict(error='database_busy'))
+            return self.reply(200,dict(jobs=found))
         def do_POST(self):
             if not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+secret):return self.reply(401,dict(error='unauthorized'))
             if social_only and self.path!='/social':return self.reply(404,dict(error='not_found'))
@@ -55,7 +59,10 @@ def serve(port=8080,db_path="data/post-paper.sqlite",social_only=False):
                 if self.path=='/social':
                     import sqlite3
                     from .social import submit
-                    with sqlite3.connect(db_path,timeout=5) as db:return self.reply(200,submit(db,ask))
+                    try:
+                        with sqlite3.connect(db_path,timeout=5) as db:accepted=submit(db,ask)
+                    except sqlite3.Error:return self.reply(503,dict(error='database_busy'))
+                    return self.reply(200,accepted)
                 if not isinstance(ask,dict) or set(ask)!={'question_set','state'} or not isinstance(ask['state'],dict):raise ValueError()
                 qs=questions(ask['question_set'],ask['state'])
             except (ValueError,TypeError,KeyError):return self.reply(422,dict(error='invalid_question_or_state'))

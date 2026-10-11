@@ -38,6 +38,35 @@ def cycle_text(result):
     return line+('. Paper buy: '+result['selected_token'] if result.get('paper_buys') else '. No trade.')
 
 
+def usd(value):
+    if not isinstance(value,(int,float)):return '?'
+    for size,unit in ((1e9,'B'),(1e6,'M'),(1e3,'k')):
+        if abs(value)>=size:return f'${value/size:.1f}{unit}'
+    return f'${value:.0f}'
+
+
+def outcome(desk,run_id,snapshot):
+    row=desk.db.execute('SELECT stage,data FROM ai_decisions WHERE run_id=? AND token=? ORDER BY id DESC LIMIT 1',(run_id,snapshot['token'])).fetchone() if run_id is not None else None
+    if row is None:return ', '.join(snapshot.get('early_rejection_reasons') or ['no decision'])
+    data=json.loads(row[1]) if row[1] else {}
+    detail=data.get('reasons') or data.get('reason') if isinstance(data,dict) else None
+    return row[0]+(': '+(', '.join(detail) if isinstance(detail,list) else str(detail)) if detail else '')
+
+
+def market_text(desk,result,run_id=None,snapshots=()):
+    """What the market looked like this cycle: source health, then the tokens that reached market checks."""
+    d=result.get('discovery') or {};fomo=d.get('fomo') or {}
+    errors=fomo.get('batch_errors') or []
+    health='FOMO '+str(fomo.get('status','not used'))+(' ('+str(fomo.get('returned_tokens',0))+' tokens)' if fomo else '')
+    if errors:health+=', error: '+str(errors[0].get('reason','unknown'))[:80]
+    health+='; feed '+('FAILED' if d.get('fetch_failed') else str(d.get('retained_tokens',0))+' watched')
+    lines=['Market data: '+health]
+    for s in sorted(snapshots,key=lambda s:-(s.get('volume_24h') or 0))[:5]:
+        lines.append('- '+str(s.get('symbol') or s['token'][:6])+' mcap '+usd(s.get('market_cap'))+', liq '+usd(s.get('liquidity'))+', vol24 '+usd(s.get('volume_24h'))+' -> '+outcome(desk,run_id,s)[:120])
+    if len(snapshots)>5:lines.append(f'(+{len(snapshots)-5} more)')
+    return '\n'.join(lines)
+
+
 def day_text(desk,day):
     start=datetime.strptime(day,'%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp();end=start+86400
     count=lambda sql:desk.db.execute(sql,(start,end)).fetchone()[0]
@@ -50,11 +79,11 @@ def day_text(desk,day):
     return f'PAPER end of day {day}: {cycles} cycles, {rejects} rejections, {buys} fills, {closes} closes, realized P&L ${pnl:.2f} ({pnl/equity*100 if equity else 0:.2f}% of working capital)'
 
 
-def after_cycle(desk,result,telegram=None,now=None):
+def after_cycle(desk,result,telegram=None,now=None,run_id=None,snapshots=()):
     """Send what the post's CHIEF sends. Unconfigured Telegram records 'not_configured'; failures never stop the desk."""
     telegram=telegram or Telegram();now=time.time() if now is None else now
     if not telegram.configured:return 'not_configured'
-    messages=[cycle_text(result)]
+    messages=[cycle_text(result)+'\n'+market_text(desk,result,run_id,snapshots)]
     today=datetime.fromtimestamp(now,timezone.utc).strftime('%Y-%m-%d')
     last_day=state(desk,'last_day')
     if last_day and last_day!=today:messages.append(day_text(desk,last_day))

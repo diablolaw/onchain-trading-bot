@@ -12,6 +12,8 @@ from .bench import reject
 # The post reads X inside the dossier. Evidence arrives asynchronously from the Grok SOCIAL seat,
 # so a candidate with a published handle waits this long for it before proceeding unvetted.
 SOCIAL_WAIT_SECONDS=1800
+# After a handle has gone unanswered, do not hold the same token for it again within this long.
+SOCIAL_REWAIT_SECONDS=6*3600
 
 
 def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
@@ -50,12 +52,25 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 mint_authority=mint.get('mint_authority'),freeze_authority=mint.get('freeze_authority'),
                 top_wallet_percent=holders.get('top_account_pct'),top_10_percent=holders.get('top10_account_pct'),
                 holder_count=holders.get('owner_count'),developer_holding_percentage=indexed.get('developer_holding_percentage'),
-                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*.06,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
+                intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*desk.rules.max_bank_fraction,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
             market_state={k:dossier.get(k) for k in ('observations','changes','holder_growth','volume_ratio_6h','change','liquidity_usd','intended_ticket_usd','ticket_basis')}
             market_state['trade_windows']=snapshot.get('trade_windows')
+            created=snapshot.get('created_at')
+            market_state['pool_age_hours']=round((time.time()-created)/3600,2) if type(created) in (int,float) and 0<created<=time.time() else None
             job=snapshot.get('social_job') or {}
-            if indexed.get('x_handle') and not snapshot.get('social_evidence') and type(job.get('requested_at')) in (int,float) and time.time()-job['requested_at']<SOCIAL_WAIT_SECONDS:
-                audit(desk,run_id,token,'post_social_pending',dict(handle=indexed['x_handle'],waited_seconds=int(time.time()-job['requested_at'])));continue
+            if indexed.get('x_handle') and not snapshot.get('social_evidence') and type(job.get('requested_at')) in (int,float):
+                # The job's own clock restarts every hour so the seat is asked again. Count the wait from the
+                # first time this handle was pending, or an unanswered handle waits 30 minutes of every hour.
+                first=desk.db.execute("SELECT MIN(at-json_extract(data,'$.waited_seconds')) FROM ai_decisions WHERE token=? AND stage='post_social_pending' AND json_extract(data,'$.handle')=? AND at>=?",(token,indexed['x_handle'],time.time()-SOCIAL_REWAIT_SECONDS)).fetchone()[0]
+                since=job['requested_at'] if first is None else min(first,job['requested_at'])
+                if time.time()-since<SOCIAL_WAIT_SECONDS:
+                    audit(desk,run_id,token,'post_social_pending',dict(handle=indexed['x_handle'],waited_seconds=int(time.time()-since)));continue
+            if desk.rules.paper_fixed_fraction and not snapshot.get('observe_only') and not snapshot.get('sizing_evidence'):
+                # Do not pay the judge for a ticket SIZE will zero: on a small bank the fee floor blocks the cut ticket.
+                cash=float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])
+                trial=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,snapshot['liquidity'],partial=not snapshot.get('social_evidence'),liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction)
+                if trial['dollars']<=0:
+                    audit(desk,run_id,token,'post_size_block',dict(reason='ticket_fails_fee_ceiling_before_judging',partial=not snapshot.get('social_evidence'),break_even_pct=trial.get('break_even_pct')));continue
             market=judged(token,'post_market',market_state,'market')
             if market is None:continue
             chain_state={k:dossier.get(k) for k in ('mint_authority','freeze_authority','top_wallet_percent','top_10_percent','holder_count','developer_holding_percentage')}
@@ -94,7 +109,7 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 entry_size=size(cash,cash,e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3),liquidity_fraction=liquidity_fraction)
                 audit(desk,run_id,selected,'post_size',entry_size)
             elif desk.rules.paper_fixed_fraction:
-                entry_size=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction)
+                entry_size=fixed_size(cash,cash,desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction)
                 audit(desk,run_id,selected,'post_size',entry_size)
             else:
                 audit(desk,run_id,selected,'post_size',dict(reason='missing_fresh_explicit_kelly_inputs'));selected=None

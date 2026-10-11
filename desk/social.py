@@ -12,9 +12,11 @@ def request(desk,token,handle):
     handle=clean_handle(handle)
     if not handle:return None
     now=time.time()
+    row=desk.db.execute('SELECT data,observed_at FROM social_evidence WHERE token=? AND lower(handle)=lower(?) AND observed_at>=? AND observed_at<=?',(token,handle,now-3600,now)).fetchone()
+    # Evidence in the first half of its hour needs no new job; asking again only spent the seat's turns.
+    if row and now-row[1]<1800:return json.loads(row[0])
     # Keep the original request time while the job is live, so callers can bound how long they wait.
     with desk.db:desk.db.execute('INSERT INTO social_jobs VALUES (?,?,?) ON CONFLICT(token) DO UPDATE SET at=CASE WHEN lower(handle)=lower(excluded.handle) AND at>=? THEN at ELSE excluded.at END,handle=excluded.handle',(token,handle,now,now-3600))
-    row=desk.db.execute('SELECT data FROM social_evidence WHERE token=? AND lower(handle)=lower(?) AND observed_at>=? AND observed_at<=?',(token,handle,time.time()-3600,time.time())).fetchone()
     return json.loads(row[0]) if row else None
 
 
