@@ -4,7 +4,9 @@ import math
 def soft_reasons(market,chain,social=None):
     reasons=[]
     if market['shape']['choice'] in ('fading','one_buyer'):reasons.append('shape')
-    if market['shape']['probabilities']['crowd']<.55:reasons.append('shape_weak')
+    # "Too early" is missing history, not a bad shape: it gets its own reason so the bench stays short
+    # and the token is judged again once there is more to see.
+    if market['shape']['probabilities']['crowd']<.55:reasons.append('shape_too_early' if market['shape']['choice']=='too_early' else 'shape_weak')
     for answers,key,threshold,maximum in (
         (market,'liquidity_fits_ticket',.60,False),(market,'momentum_already_spent',.60,True),
         (chain,'concentration_is_exit_risk',.55,True),(chain,'dev_still_loaded',.55,True),

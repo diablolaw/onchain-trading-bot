@@ -112,6 +112,36 @@ class Bench(unittest.TestCase):
         self.assertEqual(minutes(['liquidity', 'volume']), 25)
         self.assertEqual(minutes(['liquidity_fits_ticket']), 25)
         self.assertEqual(minutes(['shape', 'shape_weak', 'momentum_already_spent']), 120)
+        self.assertEqual(minutes(['shape_too_early']), 25)
+
+    def test_too_early_is_not_benched_like_a_bad_shape(self):
+        from desk.post_policy import soft_reasons
+        chain = {'authority_risk': {'choice': 'renounced'}, 'concentration_is_exit_risk': {'noul': .2}, 'dev_still_loaded': {'noul': .2}}
+        market = {'shape': {'choice': 'too_early', 'probabilities': {'crowd': .1}}, 'liquidity_fits_ticket': {'noul': .8}, 'momentum_already_spent': {'noul': .4}}
+        self.assertEqual(soft_reasons(market, chain), ['shape_too_early'])
+        market['shape']['choice'] = 'crowd'
+        self.assertEqual(soft_reasons(market, chain), ['shape_weak'])
+
+    def test_first_look_gets_holder_growth_from_two_readings_in_one_cycle(self):
+        from desk.comparison import growth_between
+        first = dict(source='fomo:filterTokens', observed_at=NOW, holder_count=200, price=1.0)
+        last = dict(first, observed_at=NOW + 300, holder_count=230, price=1.1)
+        g = growth_between(first, last)
+        self.assertEqual((round(g['holder_growth_pct'], 6), round(g['price_growth_pct'], 6), g['window_seconds']), (15.0, 10.0, 300))
+        self.assertIsNone(growth_between(first, dict(last, observed_at=NOW + 30)))
+        self.assertIsNone(growth_between(first, dict(last, source='other')))
+        self.assertIsNone(growth_between(None, last))
+
+    def test_fomo_batches_retry_once_after_a_lapsed_login(self):
+        from desk.fomo import collect_batches
+        bridge = Mock()
+        bridge.tokens.side_effect = [RuntimeError('FOMO market request failed: session_expired_reload_fomo'), {'a': 1}]
+        waits = []
+        self.assertEqual(collect_batches(bridge, ['a'], sleep=waits.append), ({'a': 1}, []))
+        self.assertEqual(waits, [75])
+        bridge.tokens.side_effect = [RuntimeError('FOMO market request failed: fomo_http_500')]
+        metrics, errors = collect_batches(bridge, ['a'], sleep=waits.append)
+        self.assertEqual((metrics, len(errors), waits), ({}, 1, [75]))
         self.assertEqual(minutes(['pair_age_out_of_range']), 20)
         self.assertEqual(minutes(['effort']), 45)
 

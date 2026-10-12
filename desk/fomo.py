@@ -151,17 +151,27 @@ class Bridge:
                 self.jobs=[j for j in self.jobs if j['id'] not in ids]
 
 
-def collect_batches(bridge,tokens):
-    """Keep successful batches and give each browser request its own deadline."""
+def collect_batches(bridge,tokens,retry_wait=75,sleep=time.sleep):
+    """Keep successful batches and give each browser request its own deadline.
+
+    A lapsed FOMO login makes the extension reload the page, which takes a moment to produce a new
+    one. Batches that failed only for that reason are asked once more after retry_wait seconds."""
     tokens=list(dict.fromkeys(tokens));metrics={};errors=[]
-    for offset in range(0,len(tokens),20):
-        batch=tokens[offset:offset+20]
-        try:metrics.update(bridge.tokens(batch))
-        except (RuntimeError,ValueError,TypeError,KeyError) as error:
-            # Only bridge-generated messages have already been sanitized.
-            message=str(error)
-            safe=message if isinstance(error,RuntimeError) and message.startswith(('FOMO browser bridge timed out','FOMO market request failed:')) else type(error).__name__
-            errors.append(dict(batch=offset//20,requested=len(batch),reason=safe))
+    def attempt(batches):
+        failed=[]
+        for index,batch in batches:
+            try:metrics.update(bridge.tokens(batch))
+            except (RuntimeError,ValueError,TypeError,KeyError) as error:
+                # Only bridge-generated messages have already been sanitized.
+                message=str(error)
+                safe=message if isinstance(error,RuntimeError) and message.startswith(('FOMO browser bridge timed out','FOMO market request failed:')) else type(error).__name__
+                failed.append((index,batch,safe))
+        return failed
+    failed=attempt([(offset//20,tokens[offset:offset+20]) for offset in range(0,len(tokens),20)])
+    if failed and retry_wait and all('session_' in reason for _,_,reason in failed):
+        sleep(retry_wait)
+        failed=attempt([(index,batch) for index,batch,_ in failed])
+    errors=[dict(batch=index,requested=len(batch),reason=reason) for index,batch,reason in failed]
     return metrics,errors
 
 

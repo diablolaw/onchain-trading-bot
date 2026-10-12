@@ -142,6 +142,22 @@ def schedule(desk, found, limit, now, excluded=()):
     return chosen,len(rows)
 
 
+def growth_between(first,last,minimum_seconds=120):
+    """Holder and price change between two same-source venue readings taken in one cycle.
+
+    A token judged the first time it passes has no earlier cycle to compare with, and without
+    holder growth the judge can only answer "too early"."""
+    if not first or not last or first.get('source')!=last.get('source'):return None
+    a,b=number(first.get('observed_at')),number(last.get('observed_at'))
+    if a is None or b is None or b-a<minimum_seconds:return None
+    def change(field):
+        x,y=number(first.get(field)),number(last.get(field))
+        return (y/x-1)*100 if x and y is not None else None
+    growth=change('holder_count')
+    if growth is None:return None
+    return dict(holder_growth_pct=growth,price_growth_pct=change('price'),window_seconds=round(b-a))
+
+
 def rank_before_dossiers(desk,candidates,metrics,markets):
     """Comparable FOMO holder/price changes order scarce dossier slots."""
     desk.db.execute('CREATE TABLE IF NOT EXISTS venue_rank_history(token TEXT PRIMARY KEY,observed_at REAL NOT NULL,data TEXT NOT NULL)')

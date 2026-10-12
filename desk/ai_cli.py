@@ -356,12 +356,16 @@ def run(args,desk):
                     except Exception as error:
                         # The old observation stays and ages out under the normal freshness rule.
                         recorder('ai:market_refresh_error',dict(token=snapshot['token'],error_type=type(error).__name__),time.time())
-                refreshed,refresh_errors=collect_batches(bridge,refresh_tokens)
+                # No retry wait here: the prices just re-fetched above must not age while waiting on FOMO.
+                refreshed,refresh_errors=collect_batches(bridge,refresh_tokens,retry_wait=0)
                 recorder('fomo:pre_ai_refresh',dict(metrics=refreshed,errors=refresh_errors),time.time())
                 for snapshot in snapshots:
                     if snapshot['token'] not in refresh_tokens:continue
                     if snapshot['token'] in refreshed:
                         snapshot['fomo']=refreshed[snapshot['token']]
+                        from .comparison import growth_between
+                        # Evidence for the judge only; the hard holder rule keeps using cycle-to-cycle history.
+                        snapshot['cycle_growth']=growth_between(fomo_metrics.get(snapshot['token']),refreshed[snapshot['token']])
                     else:
                         snapshot['early_rejection_reasons']=['fomo_evidence_unavailable']
                 discovery['fomo']['pre_ai_refresh_errors']=refresh_errors

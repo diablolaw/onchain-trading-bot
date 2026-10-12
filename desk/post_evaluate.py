@@ -55,6 +55,9 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 intended_ticket_usd=min(desk.rules.ticket,float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])*desk.rules.max_bank_fraction,snapshot['liquidity']*liquidity_fraction),ticket_basis='upper bound before Kelly sizing; execution quotes required after sizing',concentration_measure='largest token accounts including unidentified vaults; not aggregated wallet ownership')
             market_state={k:dossier.get(k) for k in ('observations','changes','holder_growth','volume_ratio_6h','change','liquidity_usd','intended_ticket_usd','ticket_basis')}
             market_state['trade_windows']=snapshot.get('trade_windows')
+            recent=snapshot.get('cycle_growth')
+            if market_state.get('holder_growth') is None and recent:
+                market_state.update(holder_growth=recent['holder_growth_pct'],holder_growth_price_change=recent['price_growth_pct'],holder_growth_window_seconds=recent['window_seconds'])
             created=snapshot.get('created_at')
             market_state['pool_age_hours']=round((time.time()-created)/3600,2) if type(created) in (int,float) and 0<created<=time.time() else None
             job=snapshot.get('social_job') or {}
