@@ -108,6 +108,7 @@ def main(argv=None):
     scan.add_argument('--holders', help='JSON owner-level evidence keyed by mint')
     risk = sub.add_parser('risk', help='Independent paper exit worker')
     risk.add_argument('--interval', type=float, default=15)
+    risk.add_argument('--open-interval', type=float, help='Shorter interval while a position is open; default is --interval')
     risk.add_argument('--once', action='store_true')
     watch = sub.add_parser('watch', help='Continuous discovery worker (run risk separately)')
     watch.add_argument('--interval', type=float, default=300)
@@ -185,7 +186,15 @@ def main(argv=None):
                     print(json.dumps(desk.report()), flush=True)
                     if args.command == 'scan' or getattr(args, 'once', False):
                         break
-                    time.sleep(max(0, args.interval - (time.monotonic() - start)))
+                    # Idle checks can be slow, but an open position is watched at the shorter interval,
+                    # and a new position is noticed within seconds instead of at the next idle check.
+                    while True:
+                        fast = getattr(args, 'open_interval', None)
+                        wait = fast if fast and desk.open_positions() else args.interval
+                        remaining = wait - (time.monotonic() - start)
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(5, remaining))
         finally:
             desk.close()
     except KeyboardInterrupt:

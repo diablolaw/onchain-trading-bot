@@ -132,6 +132,69 @@ class Bench(unittest.TestCase):
         self.assertIsNone(growth_between(first, dict(last, source='other')))
         self.assertIsNone(growth_between(None, last))
 
+    def test_paper_fills_use_the_quoted_price_impact_when_it_is_worse_than_the_flat_assumption(self):
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules(slippage_bps=200))
+            try:
+                quotes = dict(buy=dict(price_impact_pct=8.5), sell=dict(price_impact_pct=.3))
+                run = desk.run('test', NOW)
+                desk.record(run, sample(preflight=dict(quotes=quotes)), NOW)
+                self.assertAlmostEqual(float(desk.db.execute("SELECT price FROM fills WHERE side='buy'").fetchone()[0]), 1.085)
+                self.assertEqual(float(desk._slippage_bps(desk._entry_snapshot(1), 'sell')), 200)
+            finally:
+                desk.close()
+
+    def test_volume_exit_waits_out_its_grace_and_trailing_stop_sells_off_the_peak(self):
+        rules = Rules(exit_policy='post_volume', volume_exit_grace_seconds=3600, trailing_stop_pct=30)
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', rules)
+            try:
+                run = desk.run('test', NOW)
+                desk.record(run, sample(), NOW)
+                quiet = dict(volume_6h=100, volume_24h=40000)
+                desk.record(run, sample(price=1.2, now=NOW + 600, **quiet), NOW + 600, enter=False)
+                self.assertEqual(len(desk.open_positions()), 1)
+                desk.record(run, sample(price=2.4, now=NOW + 1200, **quiet), NOW + 1200, enter=False)
+                self.assertEqual(len(desk.open_positions()), 1)
+                desk.record(run, sample(price=1.6, now=NOW + 1800, **quiet), NOW + 1800, enter=False)
+                self.assertEqual(len(desk.open_positions()), 0)
+                self.assertIn('trailing_stop', desk.db.execute("SELECT reasons FROM decisions WHERE action='sell'").fetchone()[0])
+            finally:
+                desk.close()
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', rules)
+            try:
+                run = desk.run('test', NOW)
+                desk.record(run, sample(), NOW)
+                desk.record(run, sample(price=1.1, now=NOW + 3700, volume_6h=100, volume_24h=40000), NOW + 3700, enter=False)
+                self.assertIn('volume_decay', desk.db.execute("SELECT reasons FROM decisions WHERE action='sell'").fetchone()[0])
+            finally:
+                desk.close()
+
+    @patch('desk.post_evaluate.time.time', return_value=NOW)
+    def test_desk_keeps_judging_until_the_position_limit_and_sizes_on_the_whole_account(self, clock):
+        from desk.ai import AIPolicy
+        from desk.post_evaluate import evaluate
+        from test_preflight import evidence
+        for limit, calls in ((1, 0), (3, 2)):
+            rules = Rules(initial_cash=500, ticket=75, max_positions=limit, max_exposure=230, require_preflight=True, max_top10_owner_pct=60,
+                          exit_policy='post_volume', paper_fixed_fraction=.15, max_bank_fraction=.15, max_roundtrip_fee_pct=5, max_ticket_liquidity_pct=.5)
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as d:
+                desk = Desk(Path(d) / 'paper.sqlite', rules)
+                try:
+                    with desk.db:
+                        desk.db.execute("INSERT INTO positions(token,pair,symbol,opened_at,quantity,entry_price,cost,status) VALUES ('held','heldpool','H',?,'1','1','75.95','open')", (NOW - 60,))
+                        desk.db.execute("UPDATE account SET cash='424.05'")
+                    e = evidence()
+                    s = sample(token=TOKEN, holders=e['holders'], preflight=e, observe_only=True, social_evidence=None)
+                    first = desk.run('history', NOW - 30)
+                    desk.record(first, dict(s, observed_at=NOW - 30), NOW - 30, enter=False)
+                    provider = Providers()
+                    evaluate(desk, desk.run('post', NOW), [s], provider, AIPolicy(judgment_profile='post', max_calls=10))
+                    self.assertEqual(provider.calls, calls)
+                finally:
+                    desk.close()
+
     def test_fomo_batches_retry_once_after_a_lapsed_login(self):
         from desk.fomo import collect_batches
         bridge = Mock()

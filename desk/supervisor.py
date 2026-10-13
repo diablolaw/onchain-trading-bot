@@ -20,7 +20,7 @@ def run(db='data/post-paper.sqlite',decision_interval=900,worldmonitor_url=None,
     if sizing_file:decision+=['--sizing-file',str(Path(sizing_file).resolve())]
     if observe_only:decision+=['--observe-only']
     if worldmonitor_url:decision+=['--worldmonitor-url',worldmonitor_url]
-    commands={'SCAN':common+['discovery-watch','--interval','30'], 'VET_JEV':decision,'RISK':common+['risk','--interval','300'],'JUDGE':common+['judge-serve']}
+    commands={'SCAN':common+['discovery-watch','--interval','30'], 'VET_JEV':decision,'RISK':common+['risk','--interval','300','--open-interval','30'],'JUDGE':common+['judge-serve']}
     if social_port:
         # The Grok SOCIAL seat's local endpoint. The HTTPS tunnel in front of it is still run separately.
         commands['SOCIAL']=common+['judge-serve','--social-only','--port',str(social_port)]

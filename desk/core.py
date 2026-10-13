@@ -77,6 +77,11 @@ class Rules:
     rug_liquidity_drop_pct: float = 0
     whale_hold_max_seconds: int = 0
     retest_add_fraction: float = 0
+    # Paper exit additions to the post's volume-only exit; zero keeps it volume-only.
+    # Grace: no volume-decay sale this soon after entry (a token bought in a quiet hour was sold minutes later).
+    volume_exit_grace_seconds: int = 0
+    # Sell when price falls this far below its highest price since entry.
+    trailing_stop_pct: float = 0
 
     def __post_init__(self):
         for name, value in asdict(self).items():
@@ -94,7 +99,7 @@ class Rules:
                 raise ValueError(f'{name} must be finite and nonnegative')
         for name in ('max_positions', 'max_snapshot_age', 'max_holder_age', 'max_hold_seconds', 'cooldown_seconds',
                      'max_preflight_age', 'max_quote_slippage_bps', 'max_quote_network_lamports', 'min_trades_24h', 'min_holders',
-                     'whale_hold_max_seconds'):
+                     'whale_hold_max_seconds', 'volume_exit_grace_seconds'):
             if not isinstance(getattr(self, name), int) or isinstance(getattr(self, name), bool):
                 raise ValueError(f'{name} must be an integer')
         if usd(self.ticket) <= 0 or usd(self.initial_cash) <= 0 or self.max_positions < 1:
@@ -103,7 +108,7 @@ class Rules:
             raise ValueError('invalid age range or execution costs')
         if self.max_market_cap and self.min_market_cap > self.max_market_cap:
             raise ValueError('invalid market cap range')
-        for name in ('max_top_owner_pct', 'max_top10_owner_pct', 'stop_loss_pct', 'max_ticket_liquidity_pct'):
+        for name in ('max_top_owner_pct', 'max_top10_owner_pct', 'stop_loss_pct', 'max_ticket_liquidity_pct', 'trailing_stop_pct'):
             if getattr(self, name) > 100:
                 raise ValueError(f'{name} must be <= 100')
         if self.max_quote_slippage_bps > 10000 or self.max_quote_fee_bps > 10000:
@@ -337,12 +342,20 @@ class Desk:
         if reasons:
             self.log(run_id, sid, now, 'SIZE', 'skip', reasons)
             return
-        price = money(s['price']) * (1 + money(r.slippage_bps) / 10000)
+        price = money(s['price']) * (1 + self._slippage_bps(s, 'buy') / 10000)
         quantity = cost / price
         pid = self.db.execute("INSERT INTO positions(token,pair,symbol,opened_at,quantity,entry_price,cost,status) VALUES (?,?,?,?,?,?,?,'open')",
                               (s['token'], s['pair'], s['symbol'], now, str(quantity), str(price), str(cost + fee))).lastrowid
         self._fill(pid, sid, 'buy', now, price, quantity, fee, cash - cost - fee)
         self.log(run_id, sid, now, 'FILLS', 'buy', ['eligible_fixed_ticket'])
+
+    def _slippage_bps(self, entry, side):
+        """Paper slippage for one side: the configured figure, or the price impact quoted at entry when that was worse.
+
+        With wide impact limits a flat assumption would book trades at a price the quotes said was not available."""
+        quote = (((entry.get('preflight') or {}).get('quotes') or {}).get(side) or {})
+        impact = number(quote.get('price_impact_pct'))
+        return max(money(self.rules.slippage_bps), money(impact) * 100 if impact is not None else Decimal(0))
 
     def _fill(self, pid, sid, side, now, price, quantity, fee, cash):
         self.db.execute('UPDATE account SET cash=? WHERE id=1', (str(cash),))
@@ -374,9 +387,11 @@ class Desk:
             reason = 'max_hold'
         elif r.exit_policy=='post_volume' and r.rug_liquidity_drop_pct and self._liquidity_collapsed(p, s):
             reason = 'liquidity_collapse'
+        elif r.exit_policy=='post_volume' and r.trailing_stop_pct and self._below_trailing_stop(p, s):
+            reason = 'trailing_stop'
         elif r.exit_policy=='post_volume':
             ratio = volume_ratio(s)
-            if ratio is not None and ratio < r.volume_exit_ratio:
+            if ratio is not None and ratio < r.volume_exit_ratio and now - p['opened_at'] >= r.volume_exit_grace_seconds:
                 reason = 'volume_decay'
         elif number(s.get('volume_24h')) is not None and s['volume_24h'] > 0 and number(s.get('volume_6h')) is not None:
             if s['volume_6h'] / (s['volume_24h'] / 4) < r.volume_exit_ratio:
@@ -391,7 +406,7 @@ class Desk:
             return
         self.db.execute('DELETE FROM risk_holds WHERE pair=?', (s['pair'],))
         self.db.execute('DELETE FROM risk_close_intents WHERE pair=?',(s['pair'],))
-        price = money(s['price']) * (1 - money(r.slippage_bps) / 10000)
+        price = money(s['price']) * (1 - self._slippage_bps(self._entry_snapshot(p['id']), 'sell') / 10000)
         quantity = money(p['quantity'])
         gross = price * quantity
         fee = usd(max(money(r.minimum_fee_usd),gross * money(r.fee_bps) / 10000 + money(r.fixed_fee_usd)))
@@ -405,6 +420,15 @@ class Desk:
     def _entry_snapshot(self, position_id):
         row = self.db.execute("SELECT s.data FROM fills f JOIN snapshots s ON s.id=f.snapshot_id WHERE f.position_id=? AND f.side='buy' ORDER BY f.id LIMIT 1", (position_id,)).fetchone()
         return json.loads(row[0]) if row else {}
+
+    def _below_trailing_stop(self, p, s):
+        """Record the highest price seen since entry and report a fall of trailing_stop_pct below it."""
+        price = money(s['price'])
+        row = self.db.execute('SELECT peak,added FROM position_peaks WHERE position_id=?', (p['id'],)).fetchone()
+        peak = max(money(row[0]) if row else money(p['entry_price']), price)
+        self.db.execute('INSERT INTO position_peaks VALUES (?,?,?) ON CONFLICT(position_id) DO UPDATE SET peak=excluded.peak',
+                        (p['id'], str(peak), int(bool(row and row[1]))))
+        return price <= peak * (1 - money(self.rules.trailing_stop_pct) / 100)
 
     def _liquidity_collapsed(self, p, s):
         """Paper rug guard: pool liquidity fell by the configured share since entry."""

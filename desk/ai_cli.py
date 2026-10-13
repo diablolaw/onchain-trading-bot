@@ -203,9 +203,10 @@ def run(args,desk):
             if policy.judgment_profile=='post':
                 from .bench import exclude
                 before=len(candidates)
-                candidates=[] if open_tokens else exclude(desk,candidates)
+                # Keep looking while there is room for another position; tokens already held are excluded above.
+                candidates=[] if len(open_tokens)>=desk.rules.max_positions else exclude(desk,candidates)
                 discovery['skipped_before_collection']=before-len(candidates)
-                discovery['holding_position']=bool(open_tokens)
+                discovery['holding_position']=bool(open_tokens);discovery['open_positions']=len(open_tokens)
             world_context=None;entries_blocked=None
             if getattr(args,'worldmonitor_url',None):
                 from .worldmonitor import WorldMonitor

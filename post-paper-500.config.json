@@ -1,8 +1,8 @@
 {
   "initial_cash": 500,
   "ticket": 75,
-  "max_positions": 1,
-  "max_exposure": 79,
+  "max_positions": 3,
+  "max_exposure": 230,
   "require_preflight": true,
   "min_age_hours": 0.25,
   "max_age_hours": 72,
@@ -16,10 +16,10 @@
   "max_top_owner_pct": 5,
   "max_top10_owner_pct": 60,
   "max_preflight_age": 30,
-  "max_price_impact_pct": 1,
+  "max_price_impact_pct": 9,
   "max_quote_slippage_bps": 100,
   "max_quote_fee_bps": 50,
-  "max_roundtrip_loss_pct": 3,
+  "max_roundtrip_loss_pct": 11,
   "max_quote_network_lamports": 5000000,
   "concentration_measure": "token_accounts",
   "fee_bps": 45,
@@ -32,5 +32,8 @@
   "whale_hold_max_seconds": 1800,
   "retest_add_fraction": 0,
   "max_bank_fraction": 0.15,
-  "max_roundtrip_fee_pct": 5
+  "max_roundtrip_fee_pct": 5,
+  "slippage_bps": 200,
+  "volume_exit_grace_seconds": 3600,
+  "trailing_stop_pct": 20
 }
