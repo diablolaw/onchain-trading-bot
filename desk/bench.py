@@ -8,11 +8,13 @@ TRANSIENT=('invalid_owner_concentration','onchain_evidence_unavailable','missing
 
 def reason_minutes(reason):
     if any(s in reason for s in PERMANENT):return 100000
-    if any(s in reason for s in ('recycled','account_is_the_project')):return 360
+    if any(s in reason for s in ('recycled','account_is_the_project','not_locked')):return 360
     if any(s in reason for s in TRANSIENT):return 45
     if any(s in reason for s in ('top10','holder','dev_still_loaded','concentration')):return 90
     # Judged shape and momentum barely move between cycles: at 25 minutes three tokens took 22 of 35 judge calls.
     if reason in ('shape','shape_weak','momentum_already_spent'):return 120
+    # A pullback can arrive at any moment; look again next cycle.
+    if reason=='no_recent_pullback':return 9
     if 'age' in reason:return 20
     if any(s in reason for s in ('shape','momentum','liquidity','volume','trades','market_cap')):return 25
     return 45

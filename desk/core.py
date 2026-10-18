@@ -82,6 +82,17 @@ class Rules:
     volume_exit_grace_seconds: int = 0
     # Sell when price falls this far below its highest price since entry.
     trailing_stop_pct: float = 0
+    # Once the peak is this far above entry, trail by trailing_stop_tight_pct instead; zero keeps one width.
+    trailing_tighten_after_pct: float = 0
+    trailing_stop_tight_pct: float = 0
+    # Sell outright once price is this far above entry, before a rug can take the gain back.
+    post_take_profit_pct: float = 0
+    # Minimum share of pool liquidity burned or locked before buying; zero turns the check off.
+    min_locked_liquidity_pct: float = 0
+    # Buy only after a pullback: the last-hour price change must be at least this far below zero. Zero turns it off.
+    min_entry_pullback_pct: float = 0
+    # Jev's "momentum already spent" answer as a reject reason. The strategy study found the tokens it passed did worse.
+    momentum_gate: bool = True
 
     def __post_init__(self):
         for name, value in asdict(self).items():
@@ -91,7 +102,7 @@ class Rules:
             if name=='concentration_measure':
                 if value not in ('owner_aggregated','token_accounts'): raise ValueError('invalid concentration measure')
                 continue
-            if name in ('require_preflight','reject_no_sells'):
+            if name in ('require_preflight','reject_no_sells','momentum_gate'):
                 if not isinstance(value, bool):
                     raise ValueError(name+' must be boolean')
                 continue
@@ -108,7 +119,7 @@ class Rules:
             raise ValueError('invalid age range or execution costs')
         if self.max_market_cap and self.min_market_cap > self.max_market_cap:
             raise ValueError('invalid market cap range')
-        for name in ('max_top_owner_pct', 'max_top10_owner_pct', 'stop_loss_pct', 'max_ticket_liquidity_pct', 'trailing_stop_pct'):
+        for name in ('max_top_owner_pct', 'max_top10_owner_pct', 'stop_loss_pct', 'max_ticket_liquidity_pct', 'trailing_stop_pct', 'min_locked_liquidity_pct', 'trailing_stop_tight_pct'):
             if getattr(self, name) > 100:
                 raise ValueError(f'{name} must be <= 100')
         if self.max_quote_slippage_bps > 10000 or self.max_quote_fee_bps > 10000:
@@ -231,6 +242,18 @@ def vet(snapshot, rules, now, *, check_quotes=True):
         reasons.append('invalid_owner_concentration')
     elif top > rules.max_top_owner_pct or top10 > rules.max_top10_owner_pct:
         reasons.extend(concentration_reasons(top,top10,rules))
+    if rules.min_entry_pullback_pct:
+        h1 = (s.get('price_change_windows') or {}).get('h1')
+        if not isinstance(h1, (int, float)) or isinstance(h1, bool) or h1 > -rules.min_entry_pullback_pct:
+            reasons.append('no_recent_pullback')
+    if rules.min_locked_liquidity_pct:
+        lock = s.get('pool_lock') or {}
+        stamp = number(lock.get('observed_at'))
+        if (lock.get('pool') != s.get('pair') or stamp is None or not 0 <= now - stamp <= rules.max_holder_age
+                or number(lock.get('locked_pct')) is None):
+            reasons.append('liquidity_lock_unknown')
+        elif lock['locked_pct'] < rules.min_locked_liquidity_pct:
+            reasons.append('liquidity_not_locked')
     if rules.require_preflight:
         from .preflight import preflight_reasons
         reasons.extend(preflight_reasons(s.get('token'), s.get('preflight'), rules, now, check_quotes=check_quotes))
@@ -389,6 +412,8 @@ class Desk:
             reason = 'liquidity_collapse'
         elif r.exit_policy=='post_volume' and r.trailing_stop_pct and self._below_trailing_stop(p, s):
             reason = 'trailing_stop'
+        elif r.exit_policy=='post_volume' and r.post_take_profit_pct and change >= money(r.post_take_profit_pct):
+            reason = 'take_profit'
         elif r.exit_policy=='post_volume':
             ratio = volume_ratio(s)
             if ratio is not None and ratio < r.volume_exit_ratio and now - p['opened_at'] >= r.volume_exit_grace_seconds:
@@ -409,6 +434,13 @@ class Desk:
         price = money(s['price']) * (1 - self._slippage_bps(self._entry_snapshot(p['id']), 'sell') / 10000)
         quantity = money(p['quantity'])
         gross = price * quantity
+        liquidity = number(s.get('liquidity'))
+        if r.exit_policy == 'post_volume' and liquidity is not None:
+            # A sale can only take what the pool holds. Treat half the reported liquidity as the money side of a
+            # constant-product pool: negligible for a normal ticket, close to nothing once the pool is drained.
+            # Without this a drained pool was booked as a sale at its last quoted price.
+            side = money(liquidity) / 2
+            gross = gross * side / (side + gross) if side + gross > 0 else Decimal(0)
         fee = usd(max(money(r.minimum_fee_usd),gross * money(r.fee_bps) / 10000 + money(r.fixed_fee_usd)))
         proceeds = usd(gross) - fee
         cash = money(self.db.execute('SELECT cash FROM account').fetchone()[0])
@@ -428,7 +460,12 @@ class Desk:
         peak = max(money(row[0]) if row else money(p['entry_price']), price)
         self.db.execute('INSERT INTO position_peaks VALUES (?,?,?) ON CONFLICT(position_id) DO UPDATE SET peak=excluded.peak',
                         (p['id'], str(peak), int(bool(row and row[1]))))
-        return price <= peak * (1 - money(self.rules.trailing_stop_pct) / 100)
+        width = money(self.rules.trailing_stop_pct)
+        r = self.rules
+        if r.trailing_tighten_after_pct and r.trailing_stop_tight_pct and peak >= money(p['entry_price']) * (1 + money(r.trailing_tighten_after_pct) / 100):
+            # A trade already well up keeps most of its gain instead of giving back a full width.
+            width = money(r.trailing_stop_tight_pct)
+        return price <= peak * (1 - width / 100)
 
     def _liquidity_collapsed(self, p, s):
         """Paper rug guard: pool liquidity fell by the configured share since entry."""

@@ -4,8 +4,8 @@
   "max_positions": 3,
   "max_exposure": 230,
   "require_preflight": true,
-  "min_age_hours": 0.25,
-  "max_age_hours": 72,
+  "min_age_hours": 6,
+  "max_age_hours": 48,
   "min_liquidity": 12000,
   "min_volume_24h": 40000,
   "min_market_cap": 60000,
@@ -35,5 +35,11 @@
   "max_roundtrip_fee_pct": 5,
   "slippage_bps": 200,
   "volume_exit_grace_seconds": 3600,
-  "trailing_stop_pct": 20
+  "trailing_stop_pct": 20,
+  "post_take_profit_pct": 15,
+  "min_locked_liquidity_pct": 90,
+  "trailing_tighten_after_pct": 20,
+  "trailing_stop_tight_pct": 10,
+  "min_entry_pullback_pct": 10,
+  "momentum_gate": false
 }

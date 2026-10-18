@@ -340,3 +340,50 @@ def largest_account_evidence(token,mint,result,stamp):
         supply_verified=True,owner_count=None,owner_count_source=None,top_accounts=balances,exclusions=[],
         top_account_pct=float(Decimal(int(balances[0]['amount']))*100/Decimal(supply)),
         top10_account_pct=float(Decimal(sum(int(r['amount']) for r in balances[:10]))*100/Decimal(supply)))
+
+
+PUMPSWAP_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA'
+
+
+def pumpswap_lock(rpc, pool, token):
+    """Share of a PumpSwap pool's liquidity receipts that no longer exist, read from chain.
+
+    Withdrawing liquidity needs the pool's LP tokens. A pool that pump.fun graduated burns them, so
+    almost none remain; a pool someone set up by hand usually leaves them with its creator, who can
+    empty it. The pool account records how many were issued (lp_supply at byte 203, after an 8 byte
+    discriminator, bump, index, creator and four 32 byte addresses, with lp_mint at byte 107), and the
+    LP mint's live supply says how many are left. GeckoTerminal only publishes this about an hour after
+    a pool appears. Returns None for any other kind of pool.
+
+    Only the graduated shape (the token as base, wrapped SOL as quote) gets a figure. Every pool in the
+    paper run that GeckoTerminal called unlocked, swordcat's included, had SOL as base and 100 LP units,
+    and each was later found emptied with its receipts gone, so live supply cannot tell burned from
+    withdrawn for that shape. It is reported with no figure, which the hard rule rejects."""
+    import base64, struct
+    pool = address(pool)
+    result, stamp = rpc.call('getAccountInfo', [pool, {'encoding': 'base64', 'commitment': 'confirmed'}])
+    value = (result or {}).get('value') or {}
+    if value.get('owner') != PUMPSWAP_PROGRAM:
+        return None
+    raw = base64.b64decode(value['data'][0])
+    if len(raw) < 211:
+        raise ValueError('unexpected PumpSwap pool layout')
+    base, quote = b58encode(raw[43:75]), b58encode(raw[75:107])
+    if base != address(token) or quote != 'So11111111111111111111111111111111111111112':
+        return dict(pool=pool, observed_at=stamp, source='solana_rpc:pumpswap_lp_supply', locked_pct=None, shape='not_graduated_token_sol')
+    lp_mint = b58encode(raw[107:139])
+    issued = struct.unpack('<Q', raw[203:211])[0]
+    if not issued:
+        raise ValueError('PumpSwap pool reports no LP issued')
+    supply, _ = rpc.call('getTokenSupply', [lp_mint, {'commitment': 'confirmed'}])
+    live = int(supply['value']['amount'])
+    return dict(pool=pool, observed_at=stamp, source='solana_rpc:pumpswap_lp_supply', lp_mint=lp_mint,
+                lp_issued=str(issued), lp_live=str(live), locked_pct=max(0.0, min(100.0, (1 - live / issued) * 100)))
+
+
+def b58encode(raw):
+    alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+    n = int.from_bytes(raw, 'big'); out = ''
+    while n:
+        n, r = divmod(n, 58); out = alphabet[r] + out
+    return '1' * (len(raw) - len(raw.lstrip(b'\0'))) + out

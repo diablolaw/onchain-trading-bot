@@ -195,6 +195,176 @@ class Bench(unittest.TestCase):
                 finally:
                     desk.close()
 
+    def test_pullback_rule_needs_a_falling_last_hour(self):
+        from desk.core import vet
+        from desk.bench import minutes
+        rules = Rules(min_entry_pullback_pct=10)
+        check = lambda h1: 'no_recent_pullback' in vet(sample(now=NOW, price_change_windows=dict(h1=h1)), rules, NOW, check_quotes=False)
+        self.assertTrue(check(5.0)); self.assertTrue(check(-9.9)); self.assertTrue(check(None))
+        self.assertFalse(check(-10.0)); self.assertFalse(check(-35.0))
+        self.assertNotIn('no_recent_pullback', vet(sample(now=NOW, price_change_windows=dict(h1=5.0)), Rules(), NOW, check_quotes=False))
+        self.assertEqual(minutes(['no_recent_pullback']), 9)
+
+    @patch('desk.post_evaluate.time.time', return_value=NOW)
+    def test_momentum_gate_can_be_switched_off(self, clock):
+        from desk.ai import AIPolicy
+        from desk.post_evaluate import evaluate
+        from test_preflight import evidence
+        for gate, stage in ((True, 'post_soft_reject'), (False, 'post_pick')):
+            with self.subTest(gate=gate), tempfile.TemporaryDirectory() as d:
+                desk = Desk(Path(d) / 'paper.sqlite', Rules(require_preflight=True, max_top10_owner_pct=60, exit_policy='post_volume', momentum_gate=gate))
+                try:
+                    e = evidence()
+                    s = sample(token=TOKEN, holders=e['holders'], preflight=e, observe_only=True)
+                    first = desk.run('history', NOW - 30)
+                    desk.record(first, dict(s, observed_at=NOW - 30), NOW - 30, enter=False)
+                    class Spent(Providers):
+                        def judge(self, state, questions):
+                            reply = super().judge(state, questions)
+                            if 'momentum_already_spent' in reply['answers']:
+                                reply['answers']['momentum_already_spent']['noul'] = .9
+                            return reply
+                    provider = Spent()
+                    run = desk.run('post', NOW)
+                    evaluate(desk, run, [s], provider, AIPolicy(judgment_profile='post', max_calls=10))
+                    stages = [r[0] for r in desk.db.execute('SELECT stage FROM ai_decisions WHERE run_id=?', (run,))]
+                    self.assertIn(stage, stages)
+                finally:
+                    desk.close()
+
+    def test_tickets_are_whole_cents_so_the_quote_accepts_them(self):
+        result = fixed_size(489.44083121, 489.44083121, .15, 120000, partial=True, liquidity_fraction=.005, max_fee_pct=5, max_fraction=.15, cap=75)
+        self.assertEqual(result['dollars'], 44.04)
+
+    def test_an_account_that_grew_still_sizes_at_the_ticket_ceiling(self):
+        import json
+        from desk.supervisor import validate_entry_setup
+        self.assertEqual(fixed_size(529.36, 529.36, .15, 120000, liquidity_fraction=.005, max_fee_pct=5, max_fraction=.15, cap=75)['dollars'], 75)
+        self.assertEqual(fixed_size(529.36, 529.36, .15, 120000, partial=True, liquidity_fraction=.005, max_fee_pct=5, max_fraction=.15, cap=75)['dollars'], 45)
+        root = Path(__file__).resolve().parents[1]
+        config = root / 'post-paper-500.config.json'
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / 'grown.sqlite'
+            desk = Desk(db, Rules(**json.loads(config.read_text())))
+            with desk.db:
+                desk.db.execute("UPDATE account SET cash='529.35907289'")
+            desk.close()
+            validate_entry_setup(root, str(db), None, config)
+
+    def test_unlocked_or_unknown_pool_liquidity_blocks_entry(self):
+        from desk.core import vet
+        from desk.bench import minutes
+        rules = Rules(min_locked_liquidity_pct=90)
+        s = sample(now=NOW)
+        lock = dict(pool=s['pair'], observed_at=NOW - 10, source='geckoterminal:pool')
+        reasons = lambda extra: vet(dict(s, **extra), rules, NOW, check_quotes=False)
+        self.assertNotIn('liquidity_not_locked', reasons(dict(pool_lock=dict(lock, locked_pct=100.0))))
+        self.assertNotIn('liquidity_lock_unknown', reasons(dict(pool_lock=dict(lock, locked_pct=100.0))))
+        self.assertIn('liquidity_not_locked', reasons(dict(pool_lock=dict(lock, locked_pct=4.4e-10))))
+        self.assertIn('liquidity_lock_unknown', reasons({}))
+        self.assertIn('liquidity_lock_unknown', reasons(dict(pool_lock=dict(lock, locked_pct=None))))
+        self.assertIn('liquidity_lock_unknown', reasons(dict(pool_lock=dict(lock, pool='otherpool', locked_pct=100.0))))
+        self.assertIn('liquidity_lock_unknown', reasons(dict(pool_lock=dict(lock, observed_at=NOW - 7200, locked_pct=100.0))))
+        self.assertNotIn('liquidity_lock_unknown', vet(s, Rules(), NOW, check_quotes=False))
+        self.assertEqual(minutes(['liquidity_not_locked']), 360)
+
+    def test_geckoterminal_pool_lock_is_bound_to_the_pool(self):
+        from desk.discovery import GeckoTerminal
+        from test_preflight import key
+        pool = key(7)
+        http = Mock()
+        http.request.return_value = ({'data': {'id': 'solana_' + pool, 'attributes': {'locked_liquidity_percentage': '0.000000000438'}}}, NOW)
+        lock = GeckoTerminal(lambda *a: None, http=http).pool_lock(pool)
+        self.assertEqual((lock['pool'], lock['observed_at']), (pool, NOW))
+        self.assertLess(lock['locked_pct'], 1)
+        http.request.return_value = ({'data': {'id': 'solana_' + key(8), 'attributes': {'locked_liquidity_percentage': '100'}}}, NOW)
+        with self.assertRaises(ValueError):
+            GeckoTerminal(lambda *a: None, http=http).pool_lock(pool)
+
+    def test_pumpswap_lock_is_the_share_of_lp_receipts_burned(self):
+        import base64, struct
+        from desk.onchain import pumpswap_lock, PUMPSWAP_PROGRAM, b58encode
+        from test_preflight import key
+        from desk.onchain import address
+        lp = bytes(range(1, 33))
+        token = key(4)
+        def decode(text):
+            alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+            n = 0
+            for ch in text: n = n * 58 + alphabet.index(ch)
+            return n.to_bytes(32, 'big')
+        wsol = decode('So11111111111111111111111111111111111111112')
+        raw = bytes(43) + decode(token) + wsol + lp + bytes(64) + struct.pack('<Q', 4193388290301) + bytes(90)
+        reversed_raw = bytes(43) + wsol + decode(token) + lp + bytes(64) + struct.pack('<Q', 100) + bytes(90)
+        class Rpc:
+            def __init__(self, live, owner=PUMPSWAP_PROGRAM, data=raw): self.live, self.owner, self.data = live, owner, data
+            def call(self, method, params):
+                if method == 'getAccountInfo':
+                    return {'value': {'owner': self.owner, 'data': [base64.b64encode(self.data).decode(), 'base64']}}, NOW
+                self.asked = params[0]
+                return {'value': {'amount': str(self.live)}}, NOW
+        self.assertEqual(b58encode(decode(token)), token)
+        rpc = Rpc(0)
+        self.assertEqual(pumpswap_lock(rpc, key(3), token)['locked_pct'], 100.0)
+        self.assertEqual(rpc.asked, b58encode(lp))
+        self.assertEqual(pumpswap_lock(Rpc(4193388290301), key(3), token)['locked_pct'], 0.0)
+        self.assertIsNone(pumpswap_lock(Rpc(0, owner='other'), key(3), token))
+        # SOL as base is the shape every emptied pool in the run had: no figure, so the rule rejects it.
+        self.assertIsNone(pumpswap_lock(Rpc(0, data=reversed_raw), key(3), token)['locked_pct'])
+
+    def test_trailing_stop_tightens_once_the_trade_is_well_up(self):
+        rules = Rules(exit_policy='post_volume', trailing_stop_pct=20, trailing_tighten_after_pct=20, trailing_stop_tight_pct=10)
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', rules)
+            try:
+                run = desk.run('test', NOW)
+                desk.record(run, sample(), NOW)
+                entry = float(desk.db.execute('SELECT entry_price FROM positions').fetchone()[0])
+                desk.record(run, sample(price=entry * 1.15, now=NOW + 60), NOW + 60, enter=False)
+                desk.record(run, sample(price=entry * 1.15 * .88, now=NOW + 120), NOW + 120, enter=False)
+                self.assertEqual(len(desk.open_positions()), 1)
+                desk.record(run, sample(price=entry * 1.30, now=NOW + 180), NOW + 180, enter=False)
+                desk.record(run, sample(price=entry * 1.30 * .89, now=NOW + 240), NOW + 240, enter=False)
+                self.assertEqual(len(desk.open_positions()), 0)
+            finally:
+                desk.close()
+
+    def test_take_profit_sells_once_price_is_far_enough_above_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules(exit_policy='post_volume', post_take_profit_pct=50, volume_exit_grace_seconds=3600))
+            try:
+                run = desk.run('test', NOW)
+                desk.record(run, sample(), NOW)
+                desk.record(run, sample(price=1.4, now=NOW + 60), NOW + 60, enter=False)
+                self.assertEqual(len(desk.open_positions()), 1)
+                desk.record(run, sample(price=1.6, now=NOW + 120), NOW + 120, enter=False)
+                self.assertEqual(len(desk.open_positions()), 0)
+                self.assertIn('take_profit', desk.db.execute("SELECT reasons FROM decisions WHERE action='sell'").fetchone()[0])
+            finally:
+                desk.close()
+
+    def test_sale_from_a_drained_pool_books_almost_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            desk = Desk(Path(d) / 'paper.sqlite', Rules(exit_policy='post_volume', rug_liquidity_drop_pct=50))
+            try:
+                run = desk.run('test', NOW)
+                desk.record(run, sample(), NOW)
+                desk.record(run, sample(price=1.7, now=NOW + 60, liquidity=0.01), NOW + 60, enter=False)
+                self.assertEqual(len(desk.open_positions()), 0)
+                self.assertLess(float(desk.db.execute("SELECT proceeds FROM positions").fetchone()[0]), 0)
+            finally:
+                desk.close()
+
+    def test_choice_accepts_two_decimal_rounding(self):
+        qs = {'shape': {'type': 'choice', 'criteria': {'crowd': 'a', 'fading': 'b', 'one_buyer': 'c', 'too_early': 'd'}}}
+        answer = {'type': 'choice', 'choice': 'crowd', 'confidence': .75, 'probabilities': {'crowd': .81, 'fading': .15, 'one_buyer': .01, 'too_early': .02}}
+        reply = {'model': 'test', 'answers': {'shape': answer}, 'usage': {'input_tokens': 1, 'output_tokens': 1}}
+        from desk.ai import validate_jev
+        self.assertEqual(validate_jev(reply, qs)['shape']['choice'], 'crowd')
+        answer['probabilities'] = {'crowd': .81, 'fading': .1, 'one_buyer': .01, 'too_early': .02}
+        with self.assertRaises(ValueError):
+            validate_jev(reply, qs)
+
     def test_fomo_batches_retry_once_after_a_lapsed_login(self):
         from desk.fomo import collect_batches
         bridge = Mock()

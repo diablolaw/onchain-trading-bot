@@ -93,7 +93,7 @@ def validate_entry_setup(root,db,sizing_file,config=None):
         from .post_policy import fixed_size
         # A full-evidence ticket on a pool ten times the minimum liquidity must clear the fee ceiling.
         # Partial-evidence tickets may still be fee-blocked on small banks; that is reported per entry.
-        result=fixed_size(cash,cash,r.paper_fixed_fraction,r.min_liquidity*10,liquidity_fraction=r.max_ticket_liquidity_pct/100,max_fee_pct=r.max_roundtrip_fee_pct,max_fraction=r.max_bank_fraction)
+        result=fixed_size(cash,cash,r.paper_fixed_fraction,r.min_liquidity*10,liquidity_fraction=r.max_ticket_liquidity_pct/100,max_fee_pct=r.max_roundtrip_fee_pct,max_fraction=r.max_bank_fraction,cap=r.ticket)
         if not 0<result['dollars']<=r.ticket:
             # With the $0.95 fee floor and 3% round-trip ceiling, a partial ticket needs about $63,
             # so a 1.5% fraction needs roughly $7,000 of paper cash.

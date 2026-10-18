@@ -77,7 +77,8 @@ def validate_jev(reply, questions):
             if not isinstance(dist,dict) or set(dist) != set(options):
                 raise ValueError('Jev option distribution mismatch')
             values = [probability(p) for p in dist.values()]
-            if abs(sum(values)-1)>0.001 or answer.get('choice') not in options:
+            # Same two-decimal rounding as score answers: a .81/.15/.01/.02 split sums to .99.
+            if abs(sum(values)-1)>.005*len(options)+1e-9 or answer.get('choice') not in options:
                 raise ValueError('invalid Jev distribution or choice')
             if dist[answer['choice']] < max(values):
                 raise ValueError('Jev choice is not highest probability')

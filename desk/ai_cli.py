@@ -266,6 +266,17 @@ def run(args,desk):
                 candidates=first_looks_first(desk,candidates,(min(args.limit,policy.max_candidates)+1)//2)
             rpc=(PostSolanaRPC(recorder,http=JsonHTTP(spacing=6.1,attempts=2),allow_mutable_metadata=policy.judgment_profile=='post') if desk.rules.concentration_measure=='token_accounts' else SolanaRPC(recorder,allow_transfer_fees=True))
             jupiter=Jupiter(recorder)
+            def read_lock(pool,token):
+                """GeckoTerminal's figure and, for PumpSwap pools, the chain's; the lower one counts.
+                Neither available means no figure, which the hard rule rejects: a pool is never assumed locked."""
+                from .onchain import pumpswap_lock
+                found=[]
+                for name,read in (('gecko',lambda:gecko.pool_lock(pool)),('chain',lambda:pumpswap_lock(rpc,pool,token))):
+                    try:
+                        lock=read()
+                        if lock and lock.get('locked_pct') is not None:found.append(lock)
+                    except Exception as error:recorder('ai:pool_lock_error',dict(token=token,source=name,error_type=type(error).__name__),time.time())
+                return min(found,key=lambda l:l['locked_pct']) if found else None
             dossiers=0
             for candidate in candidates:
                 token = candidate['token']
@@ -292,7 +303,7 @@ def run(args,desk):
                     cheap = snapshot.get('early_rejection_reasons',[]) + [r for r in vet(snapshot,desk.rules,time.time()) if r in (
                         'invalid_identity','stale_market_data','missing_price','low_or_missing_liquidity',
                         'pair_age_out_of_range','low_or_missing_volume','market_cap_missing','market_cap_out_of_range',
-                        'trade_count_missing','too_few_trades','sell_activity_missing','buys_without_sells')]
+                        'trade_count_missing','too_few_trades','sell_activity_missing','buys_without_sells','no_recent_pullback')]
                     if cheap:
                         snapshot['early_rejection_reasons'] = cheap
                     if not cheap and dossiers>=min(args.limit,policy.max_candidates):
@@ -318,6 +329,8 @@ def run(args,desk):
                                     evidence['holders']['owner_count_observed_at']=indexed['observed_at']
                             except Exception as error:
                                 evidence['holder_count_error']=type(error).__name__
+                        if desk.rules.min_locked_liquidity_pct:
+                            snapshot['pool_lock']=read_lock(snapshot['pair'],token)
                         evidence['observed_at']=time.time()
                         evidence['reasons']=preflight_reasons(token,evidence,desk.rules,time.time(),check_quotes=policy.judgment_profile!='post')
                         evidence['screen_passed']=not evidence['reasons']
@@ -388,6 +401,9 @@ def run(args,desk):
                 evidence['screen_passed']=not evidence['reasons']
                 desk.preflight(run_id,evidence)
                 fresh['preflight'],fresh['holders']=evidence,evidence['holders']
+                if desk.rules.min_locked_liquidity_pct:
+                    # Read the lock again just before buying: it is the one thing that changes when a pool is about to be emptied.
+                    fresh['pool_lock']=read_lock(snapshot['pair'],snapshot['token'])
                 return fresh
             sizing=json.loads(Path(args.sizing_file).read_text()) if getattr(args,'sizing_file',None) else {}
             for snapshot in snapshots:

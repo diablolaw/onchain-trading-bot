@@ -57,6 +57,20 @@ class GeckoTerminal:
         return pools
 
 
+    def pool_lock(self, pool):
+        """Share of the pool's liquidity that is burned or locked, as GeckoTerminal reports it.
+
+        An unlocked pool can be emptied by whoever holds its liquidity, as the first paper trade's was."""
+        pool=address(pool)
+        payload,stamp=self.http.request(self.base+'/networks/solana/pools/'+pool,
+            headers={'Accept':'application/json;version=20230203'})
+        self.recorder('geckoterminal:pool',payload,stamp)
+        row=payload.get('data') if isinstance(payload,dict) else None
+        if not isinstance(row,dict) or row.get('id')!='solana_'+pool or not isinstance(row.get('attributes'),dict):
+            raise ValueError('invalid GeckoTerminal pool identity')
+        locked=number(row['attributes'].get('locked_liquidity_percentage'))
+        return dict(pool=pool,observed_at=stamp,source='geckoterminal:pool',locked_pct=locked if locked is not None and locked<=100 else None)
+
     def token_info(self, token):
         token=address(token)
         payload,stamp=self.http.request(self.base+'/networks/solana/tokens/'+token+'/info',

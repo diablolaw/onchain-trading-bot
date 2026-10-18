@@ -74,7 +74,7 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
             if desk.rules.paper_fixed_fraction and not snapshot.get('observe_only') and not snapshot.get('sizing_evidence'):
                 # Do not pay the judge for a ticket SIZE will zero: on a small bank the fee floor blocks the cut ticket.
                 cash=float(desk.db.execute('SELECT cash FROM account WHERE id=1').fetchone()[0])
-                trial=fixed_size(cash,bank(cash),desk.rules.paper_fixed_fraction,snapshot['liquidity'],partial=not snapshot.get('social_evidence'),liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction)
+                trial=fixed_size(cash,bank(cash),desk.rules.paper_fixed_fraction,snapshot['liquidity'],partial=not snapshot.get('social_evidence'),liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction,cap=desk.rules.ticket)
                 if trial['dollars']<=0:
                     audit(desk,run_id,token,'post_size_block',dict(reason='ticket_fails_fee_ceiling_before_judging',partial=not snapshot.get('social_evidence'),break_even_pct=trial.get('break_even_pct')));continue
             market=judged(token,'post_market',market_state,'market')
@@ -89,7 +89,7 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
                 social_state=dict(snapshot['social_evidence'],token=dict(ticker=snapshot.get('symbol'),narrative=indexed.get('description')),published_handle=indexed.get('x_handle'))
                 social=judged(token,'post_social',social_state,'social')
                 if social is None:continue
-            reasons=soft_reasons(market['answers'],chain['answers'],social['answers'] if social else None)
+            reasons=[r for r in soft_reasons(market['answers'],chain['answers'],social['answers'] if social else None) if desk.rules.momentum_gate or r!='momentum_already_spent']
             if reasons:
                 audit(desk,run_id,token,'post_soft_reject',dict(reasons=reasons))
                 reject(desk,token,reasons)
@@ -112,10 +112,10 @@ def evaluate(desk,run_id,snapshots,providers,policy,refresh_selected=None):
             elif chosen['snapshot'].get('entries_blocked'):
                 audit(desk,run_id,selected,'post_size',dict(reason=chosen['snapshot']['entries_blocked']));selected=None
             elif explicit:
-                entry_size=size(cash,bank(cash),e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3),liquidity_fraction=liquidity_fraction)
+                entry_size=size(cash,bank(cash),e['probability'],e['payoff'],chosen['snapshot']['liquidity'],partial=chosen['partial'],locked_cash=e.get('locked_cash',0),operating_reserve=e.get('operating_reserve',0),max_fee_pct=e.get('max_fee_pct',3),liquidity_fraction=liquidity_fraction,cap=desk.rules.ticket)
                 audit(desk,run_id,selected,'post_size',entry_size)
             elif desk.rules.paper_fixed_fraction:
-                entry_size=fixed_size(cash,bank(cash),desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction)
+                entry_size=fixed_size(cash,bank(cash),desk.rules.paper_fixed_fraction,chosen['snapshot']['liquidity'],partial=chosen['partial'],liquidity_fraction=liquidity_fraction,max_fee_pct=desk.rules.max_roundtrip_fee_pct,max_fraction=desk.rules.max_bank_fraction,cap=desk.rules.ticket)
                 audit(desk,run_id,selected,'post_size',entry_size)
             else:
                 audit(desk,run_id,selected,'post_size',dict(reason='missing_fresh_explicit_kelly_inputs'));selected=None
